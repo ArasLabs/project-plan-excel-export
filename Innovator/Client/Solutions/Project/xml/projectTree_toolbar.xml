@@ -1,0 +1,50 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<toolbarapplet on_click="onToolbarButtonClick" on_load="onToolbarLoad" buttonstyle="windows" buttonsize="26,25" font="Arial-8">
+	<toolbar id="tb1">
+		<drop_down_button id="view_panels_menu" disabled="true" text="View" tooltip="Additional view panels"/>
+		<choice id="saved_search_project_tree" label="Saved searches:"/>
+		<separator/>
+		<drop_down_button id="actions_menu" text="Actions"/>
+		<separator/>
+		<button image="../images/ProjectExpandAll.svg" id="expand_all" tooltip="Expand All" text="Expand All"/>
+		<button image="../images/ProjectCollapseAll.svg" id="collapse_all" tooltip="Collapse All" text="Collapse All"/>
+		<separator/>
+
+		<button disabled="true" image="../images/AddWBSElement.svg" id="add_wbs_element" tooltip="Add WBS Element" text="Add WBS Element"/>
+		<button disabled="true" image="../images/AddActivity.svg" id="add_activity" tooltip="Add Activity" text="Add Activity"/>
+		<button disabled="true" image="../images/AddMilestone.svg" id="add_milestone" tooltip="Add Milestone" text="Add Milestone"/>
+		<separator/>
+		<button disabled="true" image="../images/UnIndent.svg" id="outdent" tooltip="Outdent" text="Outdent"/>
+		<button disabled="true" image="../images/Indent.svg" id="indent" tooltip="Indent" text="Indent"/>
+		<button disabled="true" image="../images/NextPage.svg" id="move_down" tooltip="Move Down" text="Move Down"/>
+		<button disabled="true" image="../images/PreviousPage.svg" id="move_up" tooltip="Move Up" text="Move Up"/>
+		<separator/>
+		<button disabled="true" image="../images/Copy.svg" id="copy" tooltip="Copy" text="Copy"/>
+		<button disabled="true" image="../images/Cut.svg" id="cut" tooltip="Cut" text="Cut"/>
+		<button disabled="true" image="../images/Paste.svg" id="paste" tooltip="Paste" text="Paste"/>
+		<separator/>
+		<button disabled="true" image="../images/Deliverable.svg" id="add_existing_deliverable" tooltip="Add Existing Deliverable" text="Add Existing Deliverable"/>
+		<button disabled="true" image="../images/NewDeliverable.svg" id="add_new_deliverable" tooltip="Add New Deliverable" text="Add New Deliverable"/>
+		<separator/>
+		<button image="../images/EditItem.svg" id="view_edit_selected_item" tooltip="View/Edit Selected Item" text="View/Edit Selected Item"/>
+		<button disabled="true" image="../images/Delete.svg" id="delete_selected_item" tooltip="Delete Selected Item" text="Delete Selected Item"/>
+		<button image="../images/Schedule.svg" id="execute_scheduling" tooltip="Execute Scheduling" text="Execute Scheduling"/>
+		<button disabled="true" image="../images/UpdateActivity.svg" id="open_completion_dialog" tooltip="Open Completion Dialog" text="Open Completion Dialog"/>
+		<button disabled="false" image="../images/Print.svg" id="print" tooltip="Print" text="Print"/>
+		<button image="../images/GanttChart.svg" id="show_gantt_chart" tooltip="Show Gantt Chart" text="Show Gantt Chart"/>
+		<button image="../images/ExecuteSearch.svg" id="execute_filter" tooltip="Execute Filter" text="Execute Filter"/>
+		<button image="../images/ClearSearchCriteria.svg" id="clear_filter" tooltip="Clear Filter" text="Clear Filter"/>
+		<button image="../images/ExportToExcel.svg" id="export_to_excel" tooltip="Export To Excel" text="Export to Excel"/>
+		<separator />
+		<choice id="gantt_time_delta" label="Timeline:" invisible="true">
+			<choiceitem id="day">Day</choiceitem>
+			<choiceitem id="week">Week</choiceitem>
+			<choiceitem id="month">Month</choiceitem>
+			<choiceitem id="quarter">Quarter</choiceitem>
+			<choiceitem id="year">Year</choiceitem>
+		</choice>
+		<button state="true" image="../images/ShowDependencyLinks.svg" id="gantt_dependency_links" tooltip="Show dependency links" text="Show dependency links" invisible="true" />
+		<button state="true" image="../images/ShowCompletionProgress.svg" id="gantt_completion_progress" tooltip="Show completion progress" text="Show completion progress" invisible="true" />
+		<button state="true" image="../images/ShowTaskFloat.svg" id="gantt_task_float" tooltip="Show task float" text="Show task float" invisible="true" />
+	</toolbar>
+</toolbarapplet>

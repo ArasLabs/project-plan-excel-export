@@ -1,0 +1,3490 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+	<style type="text/css">
+		#viewContainer {
+			border-top: 1px solid #d4d4d4;
+			height: calc(100% - 32px);
+		}
+
+		.viewPanel {
+			width: 100%;
+			height: 100%;
+		}
+	</style>
+	<link rel="stylesheet" href="../../../../styles/common.min.css">
+	<link rel="stylesheet" href="../../styles/PM_treeGrid/PM_treeGrid.css">
+	<script>
+		//do not rename aras, note, that aras is used, e.g., in ganttMethodsModified.js;
+		var aras = parent.aras;
+		var mainWnd = aras.getMostTopWindowWithAras(window);
+	</script>
+	<script type="text/javascript" src="../../../../javascript/include.aspx?classes=ArasModules,ScriptSet2,ScriptSet6,ToolbarWrapper"></script>
+	<script type="text/javascript" src="../../../../javascript/include.aspx?classes=/dojo.js" data-dojo-config="isDebug: false, parseOnLoad: false, baseUrl:'../../../../javascript/dojo'"></script>
+	<script type="text/javascript" src="../../javascript/scheduling_methods.js"></script>
+	<script type="text/javascript" src="../../javascript/ganttMethodsModified.js"></script>
+	<script type="text/javascript" src="../../javascript/ViewController.js"></script>
+	<script type="text/javascript" src="../../javascript/BaseViewPanel.js"></script>
+	<script type="text/javascript" src="../../javascript/UrlViewPanel.js"></script>
+	<script type="text/javascript" src="../../javascript/parseXML.js"></script>
+	<script type="text/javascript" src="../../javascript/gridItemEvents.js"></script>
+	<script type="text/javascript" src="../../javascript/TreeGridContainer.js"></script>
+	<script type="text/javascript" src="../../javascript/treeGrid/view.js"></script>
+	<script type="text/javascript" src="../../javascript/core/aras.js"></script>
+
+	<script type="text/javascript">
+	ArasModules.intl.locale = aras.getSessionContextLocale();
+		// === varibles section =======
+		var toolbarControl = null,
+			projectView = new ViewController(parent.item, parent.isEditMode),
+			viewShare = projectView.share,
+			instanceFrame,
+			treeLevelsConst = 2, // Count of levels, which will be loaded from server for dynamical tree building.
+			stylesFileBase = aras.getScriptsURL() + "../Solutions/Project/styles/",
+			xmlFileBase = aras.getScriptsURL() + "../Solutions/Project/xml/",
+			xmlParentUrl = aras.getScriptsURL() + "../Solutions/Project/",
+			actNums, // xml with numbers of activities
+			wbsId,
+			deliverableItemTypeList = null,
+			projTeamElems = null,  // { array of role: ... , identityId: ... } role - role string, identityId - id of leader
+			queryCache = new ptCache(),
+			identitiesCache = {}, // keeps identity items for setLeader
+			defaultViewId = "Default",
+			searchResultActivity2Ids = [],
+			searchResultWbsElementIds = [],
+			itemTypeDescriptors = {},
+			treeIsFullyLoaded;
+
+		let commonMenuActions = [
+			'expand_all',
+			'collapse_all',
+			'execute_filter',
+			'clear_filter',
+			//START EXPORT TO EXCEL CHANGES
+			'export_to_excel'
+			//STOP EXPORT TO EXCEL CHANGES
+		];
+		// === end of varibles section =======
+
+		window.addEventListener('beforeunload', function() {
+			aras.prepareItem4Save = Object.getPrototypeOf(aras).prepareItem4Save;
+		});
+
+		function initProjectView() {
+			const projectViewConfigurations = ProjectPlan.projectViewConfigurations;
+			const viewId = projectViewConfigurations[defaultViewId] ? defaultViewId : Object.keys(projectViewConfigurations)[0];
+			if (!viewId) {
+				return;
+			}
+
+			projectView.domNode = document.getElementById('viewContainer');
+			ProjectPlan.initTreeLoadXml();
+			const rootInitialized = initRootWBS();
+			ProjectPlan._initCustomMenuActions();
+			attachViewEventListeners();
+			loadTreeGrid();
+			projectView.configureView(projectViewConfigurations[viewId], true);
+
+			return rootInitialized
+				.then(ProjectPlan.initActNums.bind(ProjectPlan))
+				.then(function() {
+					initTree();
+					restoreColumnsWidthsFromPreference();
+				});
+		}
+
+		function attachViewEventListeners() {
+			projectView.addEventListener(window, "onViewConfigured", onProjectViewConfigured);
+			projectView.addEventListener(window, "onViewDestroyed", onProjectViewDestroyed);
+			projectView.addEventListener(window, "onPanelCreate", onViewPanelCreate);
+			projectView.addEventListener(window, "onPanelDestroy", onViewPanelDestroy);
+		}
+
+		function onProjectViewConfigured() {
+
+			var panelsCount = projectView.panelsCount,
+				toolbarList = toolbarControl.getItem("view_panels_menu");
+
+			if (panelsCount && toolbarList) {
+				var panelsInList = 0,
+					viewPanel, i;
+
+				toolbarList.removeAll();
+
+				for (i = 0; i < panelsCount; i++) {
+					viewPanel = projectView.getPanelByIndex(i);
+
+					if (viewPanel.toggleable) {
+						toolbarList.Add("view_panel" + viewPanel.id, viewPanel.name, viewPanel.visible);
+						panelsInList++;
+					}
+				}
+				toolbarList.setEnabled(panelsInList > 0);
+			}
+		}
+
+		function onProjectViewDestroyed() {
+			viewShare.properties.selectedItemIds = [];
+		}
+
+		function onViewPanelCreate(panelId) {
+			var viewPanel = projectView.getPanelById(panelId);
+
+			if (viewPanel) {
+				var panelFrame = viewPanel.contentNode,
+					documentState = panelFrame.contentDocument.readyState,
+					onLoadHandler = function () {
+						registerStandartShortcuts(panelFrame.contentWindow); //come here upon completion of window.onload in treePanel.html
+					};
+
+				// register shortcuts for panel frames
+				if (documentState === "complete" || documentState === "interactive") {
+					registerStandartShortcuts(viewPanel.contentNode.contentWindow);
+				}
+
+				viewPanel.userData.loadEventListener = panelFrame.addEventListener("load", onLoadHandler);
+				viewPanel.userData.loadEventHandler = onLoadHandler;
+			}
+		}
+
+		function onViewPanelDestroy(panelId) {
+			var viewPanel = projectView.getPanelById(panelId);
+
+			if (viewPanel) {
+				if (viewPanel.userData.loadEventHandler) {
+					viewPanel.contentNode.removeEventListener("load", viewPanel.userData.loadEventHandler);
+				}
+			}
+		}
+
+		function registerStandartShortcuts(targetWindow) {
+			mainWnd.ITEM_WINDOW.registerStandardShortcuts(targetWindow);
+
+			if (mainWnd.returnBlockerHelper) {
+				mainWnd.returnBlockerHelper.attachBlocker(targetWindow);
+			}
+		}
+
+		function onViewUpdateMenuActions() {
+			var selectedItemIds = viewShare.properties.selectedItemIds,
+				isMultipleSelection = selectedItemIds.length > 1,
+				viewPanelsList = toolbarControl.getItem("view_panels_menu");
+
+			if (viewPanelsList && viewPanelsList.getItemCount()) {
+				enableMenuItem("view_panels_menu");
+			}
+
+			if (!isMultipleSelection) {
+				enableMenuItem("actions_menu");
+				ProjectPlan.updateCustomActionsMenu(selectedItemIds[0]);
+			}
+
+			// actions, which allways enabled
+			enableMenuItems(commonMenuActions);
+
+			onUpdateMenuActions();
+
+			if (treeGrid.disabledRows.size) {
+				disableMenuItem('expand_all');
+			}
+		}
+
+		function initSharedItems() {
+			viewShare.variables.menuActions = [];
+
+			viewShare.functions.getItemNodeById = window.getItemNodeById;
+			viewShare.functions.loadFullProjectTree = window.loadFullProjectTree;
+
+			Object.defineProperty(viewShare.properties, "isEditMode", {
+				get: function () { return parent.isEditMode; }
+			});
+
+			viewShare.internal.wbs = undefined;
+			Object.defineProperty(viewShare.properties, "wbs", {
+				get: function () { return viewShare.internal.wbs; },
+				set: function (value) {
+					viewShare.internal.wbs = value;
+					fillActivitiesFromWbs();
+				}
+			});
+
+			Object.defineProperty(viewShare.properties, "wbsId", {
+				get: function () { return window.wbsId; }
+			});
+
+			viewShare.internal.cutSelectedItemsBuffer = null;
+			Object.defineProperty(viewShare.properties, "cutSelectedItemsBuffer", {
+				get: function () {
+					return viewShare.internal.cutSelectedItemsBuffer;
+				},
+				set: function (buffer) {
+					viewShare.internal.cutSelectedItemsBuffer = buffer;
+				}
+			});
+
+			viewShare.internal.copyQryBuffer = null;
+			Object.defineProperty(viewShare.properties, "copyQryBuffer", {
+				get: function () {
+					return viewShare.internal.copyQryBuffer;
+				},
+				set: function (buffer) {
+					viewShare.internal.copyQryBuffer = buffer;
+				}
+			});
+
+			Object.defineProperty(viewShare.properties, "selectedItemIds", {
+				get: function () {
+					return treeGrid.getSelectedItemIDs();
+				},
+				set: function (itemIds) {
+					treeGrid._grid.settings.selectedRows = itemIds ? itemIds.slice() : [];
+					treeGrid._grid.render();
+					onSelectItemChanged();
+				}
+			});
+
+			viewShare.internal.xsltGantt = "";
+			Object.defineProperty(viewShare.properties, "xsltGantt", {
+				get: function () {
+					if (!viewShare.internal.xsltGantt) {
+						var xslFilePath = aras.getScriptsURL() + "../Solutions/Project/styles/gantt.xsl",
+							xsltDocument = aras.createXMLDocument();
+
+						xsltDocument.load(xslFilePath);
+						viewShare.internal.xsltGantt = xsltDocument.xml;
+					}
+
+					return viewShare.internal.xsltGantt;
+				}
+			});
+			Object.defineProperty(viewShare.properties, "projTeamElems", {
+				get: function () { return window.projTeamElems; }
+			});
+
+			// gantt functionality
+			viewShare.functions.generateSimpleGanttXml = window.generateSimpleGanttXml;
+
+			Object.defineProperty(viewShare.properties, "uniCache", {
+				get: function () { return window.uniCache; }
+			});
+			Object.defineProperty(viewShare.properties, "fld", {
+				get: function () { return window.fld; }
+			});
+			Object.defineProperty(viewShare.properties, "fldToCol", {
+				get: function () { return window.fldToCol; }
+			});
+		}//initSharedItems()
+
+		window.onload = function f_window_onload_projectPlanView() {
+			instanceFrame = parent.parent.document.getElementById("instance");
+			if (instanceFrame && instanceFrame.contentWindow) {
+				instanceFrame = instanceFrame.contentWindow;
+			}
+
+			initSharedItems();
+			ProjectPlan.init(parent.item).then(function() {
+				treeIsFullyLoaded = aras.isTempEx(ProjectPlan.projectItem);
+				viewShare.controls.activeToolbar = toolbarControl = ProjectPlan.toolbar;
+				initProjectView();
+			});
+		};
+
+		function updateMenuActionsState() {
+			toolbarControl.disable();
+			onViewUpdateMenuActions();
+		}
+
+		function addProjectTreeItem(rowId, strategy, notSameLevel) {
+			if (rowId && strategy) {
+				var selectedItem = getItemNodeById(rowId),
+					newItem = aras.newItem(strategy.itemType),
+					added = null,
+					selectedType = selectedItem.getAttribute("type"),
+					parentWbs;
+
+				if (selectedType === "WBS Element" && (strategy.itemType !== "WBS Element" || rowId === wbsId) && notSameLevel) {
+					added = addLinkRelationship(selectedItem, strategy.relationshipType, newItem, "first");
+				}
+				else {
+					parentWbs = getItemParentWbs(selectedItem);
+					added = addLinkRelationship(parentWbs, strategy.relationshipType, newItem, "below", selectedItem);
+				}
+
+				newItem = added.selectSingleNode("related_id/Item");
+				relinkPrevItemOnAdd(newItem);
+				strategy.afterAdd(newItem);
+
+				projectView.raiseEvent("onProjectItemChanged", undefined, newItem.getAttribute("id"), "add");
+			}
+		}
+
+		function addExistingDeliverable(itemId) {
+			if (!deliverableItemTypeList) {
+				initDelivITList();
+			}
+
+			var selectedItem = getItemNodeById(itemId),
+				itemDeliverableType = aras.getItemProperty(selectedItem, "deliv_type");
+
+			var callbacks = function (itemDeliverableType) {
+				if (itemDeliverableType) {
+					var typeId = aras.getItemTypeId(itemDeliverableType),
+						param = {
+							aras: aras,
+							itemtypeID: typeId,
+							multiselect: true,
+							type: "SearchDialog"
+						};
+
+					window.setTimeout(function () {
+						var win = aras.getMostTopWindowWithAras(window);
+						var dialog = (win.main || win).ArasModules.Dialog.show("iframe", param);
+
+						dialog.promise.then(function (searchResult) {
+							if (searchResult && searchResult.length) {
+								selectedItem = getItemForEdit(selectedItem);
+								var deliverableType = getDelivType(selectedItem);
+
+								for (var i = 0; i < searchResult.length; i++) {
+									var deliverableItem = aras.getItemById(itemDeliverableType, searchResult[i], 0);
+									ptNewRelationship(deliverableType, selectedItem, deliverableItem);
+								}
+								projectView.raiseEvent("onItemChanged", undefined, itemId);
+							}
+						});
+					}, 0);
+				}
+			};
+
+			if (itemDeliverableType) {
+				callbacks(aras.getItemTypeName(itemDeliverableType));
+			} else {
+				aras.uiItemTypeSelectionDialog(deliverableItemTypeList, window, callbacks);
+			}
+		}
+
+		function getItemParentWbs(itemNode) {
+			if (itemNode) {
+				return itemNode.selectSingleNode("ancestor::Item[@type='WBS Element'][1]");
+			}
+		}
+
+		function addNewDeliverable(itemId) {
+			if (!deliverableItemTypeList) {
+				initDelivITList();
+			}
+
+			var selectedItem = getItemNodeById(itemId),
+				itemDeliverableType = aras.getItemProperty(selectedItem, "deliv_type");
+
+			var callback = function (itemDeliverableType) {
+				if (itemDeliverableType) {
+					var newDeliverable = aras.newItem(itemDeliverableType);
+
+					selectedItem = getItemForEdit(selectedItem);
+					if (newDeliverable) {
+						var deliverableType = getDelivType(selectedItem),
+							newId = newDeliverable.getAttribute("id"),
+							asyncResult, allDeliverables;
+
+						ptNewRelationship(deliverableType, selectedItem, newDeliverable);
+						asyncResult = aras.uiShowItemEx(newDeliverable, "tab view");
+						allDeliverables = selectedItem.selectNodes("Relationships/Item[@type='" + deliverableType + "'][not(@action='delete')]");
+
+						if (allDeliverables.length) {
+							var arasObj = aras;
+
+							asyncResult.then(function (win) {
+								new Synchronizer(itemId, newDeliverable, win);
+							});
+						}
+						else {
+							projectView.raiseEvent("onItemChanged", undefined, itemId);
+						}
+					}
+				}
+			};
+
+			if (itemDeliverableType) {
+				callback(aras.getItemTypeName(itemDeliverableType));
+			} else {
+				aras.uiItemTypeSelectionDialog(deliverableItemTypeList, window, function(item) {
+					// setTimeout to reset security context to allow window.open executing in Chrome
+					setTimeout(function() {
+						callback(item);
+					}, 0);
+				});
+			}
+		}
+
+		function initRootWBS() {
+			const projectItem = ProjectPlan.projectItem;
+			var itemNode = projectItem.selectSingleNode("wbs_id/Item");
+
+			if (itemNode) {
+				viewShare.properties.wbs = itemNode;
+				wbsId = aras.getItemProperty(viewShare.properties.wbs, "id");
+
+				if (projectItem.getAttribute("newProject") === "true") {
+					sortItems(viewShare.properties.wbs);
+				}
+				return Promise.resolve();
+			}
+
+			wbsId = aras.getItemProperty(projectItem, "wbs_id");
+			if (!wbsId) {
+				viewShare.properties.wbs = aras.newItem("WBS Element");
+				aras.setItemProperty(viewShare.properties.wbs, "name", "New Element");
+				aras.setItemProperty(viewShare.properties.wbs, "is_top", "1");
+				aras.setItemProperty(viewShare.properties.wbs, "wbs_index", "0");
+
+				if (instanceFrame.handleItemChange) {
+					instanceFrame.handleItemChange("wbs_id", viewShare.properties.wbs);
+				}
+
+				viewShare.properties.wbs = projectItem.selectSingleNode("wbs_id/Item");
+				wbsId = aras.getItemProperty(viewShare.properties.wbs, "id");
+			}
+			else {
+				var levelsExpanded = getBranchDepth(viewShare.properties.wbs);
+
+				if (levelsExpanded === 0 && viewShare.properties.wbs !== undefined) {
+					viewShare.properties.wbs = projectItem.selectSingleNode("wbs_id/Item");
+				}
+
+				if (!viewShare.properties.wbs || (levelsExpanded > 0 && !treeIsFullyLoaded)) {
+					return asyncQueryBranch(wbsId, levelsExpanded + 1).then(function(itemNode) {
+						if (itemNode) {
+							viewShare.properties.wbs = projectItem.selectSingleNode("wbs_id");
+							viewShare.properties.wbs.text = "";
+							viewShare.properties.wbs = viewShare.properties.wbs.appendChild(itemNode.cloneNode(true));
+							return;
+						}
+
+						return aras.AlertError(aras.getResource("project", "project_tree.failed_get_wbs_with_id_and_level", wbsId, (levelsExpanded + 1)));
+					});
+				}
+			}
+
+			return Promise.resolve();
+		}//initRootWBS()
+
+		function getBranchDepth(branchNode) {
+			var levelsExpanded = 0;
+
+			if (branchNode) {
+				var oneLevelCondition, selectCondition,
+					selectResult, i;
+
+				oneLevelCondition = "Relationships/Item[@type='Sub WBS' and not(@action='delete')]/related_id/Item";
+				selectCondition = "descendant::" + oneLevelCondition;
+				selectResult = branchNode.selectNodes(selectCondition);
+
+				while (selectResult.length) {
+					selectCondition += "/" + oneLevelCondition;
+					selectResult = branchNode.selectNodes(selectCondition);
+
+					levelsExpanded++;
+				}
+			}
+
+			return levelsExpanded;
+		}
+
+		AddWbsElementStrategy = {
+			itemType: "WBS Element",
+			relationshipType: "Sub WBS",
+			afterAdd: function (newItem) {
+				updateWbsIndex(newItem, true, true);
+				aras.setItemProperty(newItem, "name", "New Element");
+				aras.setItemProperty(newItem, 'proj_num', ProjectPlan.projectNumber);
+			}
+		};
+
+		AddActivity2Strategy = {
+			isMilestone: false,
+			itemType: "Activity2",
+			relationshipType: "WBS Activity2",
+			afterAdd: function (newItem) {
+				var newName;
+
+				if (this.isMilestone) {
+					newName = "New Milestone";
+					aras.setItemProperty(newItem, "is_milestone", 1);
+					aras.setItemProperty(newItem, "expected_duration", "0");
+				}
+				else {
+					newName = "New Activity";
+					aras.setItemProperty(newItem, "expected_duration", "1");
+				}
+
+				aras.setItemProperty(newItem, "name", newName);
+				aras.setItemProperty(newItem, 'proj_num', ProjectPlan.projectNumber);
+			}
+		};
+
+		AddMilestoneStrategy = (function () {
+			var F = function () {
+				this.isMilestone = true;
+			};
+			F.prototype = AddActivity2Strategy;
+			return new F();
+		})();
+
+		function ptCache() {
+			this.links = { from: [], to: [] };
+		}
+
+		//this function inits global variables projTeamElems
+		function initGlobalVariables() {
+			if (ProjectPlan.projectItemType === 'Project') {
+				initProjTeamElems();
+			}
+		}
+
+		function initProjTeamElems() {
+			//this function inits global variable projTeamElems
+			projTeamElems = [];
+			var projTeamItems = [],
+				projTeamItem, role, related, keyedName,
+				relatedItem, idx, i;
+
+			projTeamItems = ProjectPlan.projectItem.selectNodes('descendant::Item[@type="Project Team" and not(@action="delete")]');
+
+			for (i = 0; i < projTeamItems.length; i++) {
+				projTeamItem = projTeamItems[i];
+				role = aras.getItemProperty(projTeamItem, "role");
+				related = aras.getItemProperty(projTeamItem, "related_id");
+				relatedItem = projTeamItem.selectSingleNode("related_id/Item");
+				keyedName = relatedItem ? aras.getKeyedNameEx(relatedItem) : "";
+				idx = seekInArray(projTeamElems, role, "role");
+
+				/* role - role string, identityId - id of leader */
+				if (idx === -1) {
+					projTeamElems.push({ role: role, identityId: related, identityKeyedName: keyedName });
+				}
+				else {
+					projTeamElems[idx] = { role: role, identityId: related, identityKeyedName: keyedName };
+				}
+			}
+		}
+
+		/* Method to create a new Relationship for an item
+		* relTypeId = the RelatinshpType id
+		* srcItem   = the source item in the relationship (may be null:i.e. when created with mainMenu)
+		* searchDialog = true or false : if search dialog to be displayed
+		* wnd =  the window from which the dialog is opened
+		* Aras.prototype.newRelationship = function(relTypeId,srcItem,searchDialog,wnd,relatedItem, relatedTypeName, bTestRelatedItemArg, bIsDoGetItemArg, descByTypeName)
+		*/
+		function ptNewRelationship(relTypeName, sourceItem, relatedItem, relatedTypeName) {
+			var resultNode = aras.newItem(relTypeName),
+				relsNode = sourceItem.selectSingleNode("Relationships") || sourceItem.appendChild(sourceItem.ownerDocument.createElement("Relationships"));
+
+			relsNode.appendChild(resultNode);
+			if (relatedItem) {
+				var relatedIdNode = resultNode.appendChild(resultNode.ownerDocument.createElement("related_id"));
+
+				relatedIdNode.appendChild(relatedItem);
+				resultNode.appendChild(relatedIdNode);
+			}
+			else if (relatedTypeName) {
+				var relatedNode = aras.newItem(relatedTypeName);
+				var relatedIdNode = resultNode.appendChild(resultNode.ownerDocument.createElement("related_id"));
+
+				relatedIdNode.appendChild(relatedNode);
+				resultNode.appendChild(relatedIdNode);
+			}
+
+			return resultNode;
+		}
+
+		function processStatusFields(xmlDOM) {
+			return;
+			// not implemented yet - need spec update
+		}
+
+		function onToolbarItemChange(toolbarItem) {
+			if (toolbarItem.getId() === "saved_search_project_tree") {
+				var savedSearchIdProject = toolbarItem.getSelectedItem();
+				if (savedSearchIdProject !== "emptySavedSearchProject") {
+					if (isDirty()) {
+						toolbarItem.setSelected("emptySavedSearchProject");
+						aras.AlertError(aras.getResource('project', 'project_tree.save_before_search', ProjectPlan.projectItemType));
+						return;
+					}
+					var savedSearchProject,
+						savedSearchAml,
+						savedSearchQry,
+						savedSearchItemResult,
+						i,
+						itemCountIndex,
+						savedSearchQryItems,
+						savedSearchQryItem,
+						typeOfSavedSearchQryItem,
+						savedSearchQryItemCount,
+						savedSearchItemResultNodes;
+					
+					const savedSearches = ProjectPlan.savedSearches;
+					for (i = 0; i < savedSearches.length; i++) {
+						savedSearchProject = savedSearches[i];
+						if (aras.getItemProperty(savedSearchProject, "id") === savedSearchIdProject) {
+							savedSearchAml = aras.getItemProperty(savedSearchProject, "criteria");
+							break;
+						}
+					}
+
+					var searchParameterizedHelper = new SearchParameterizedHelper();
+					searchParameterizedHelper.replaceParametersInQuery(savedSearchAml, true, function (savedSearchAmlReplacedParameters) {
+						if (!savedSearchAmlReplacedParameters) {
+							toolbarItem.setSelected("emptySavedSearchProject");
+							return;
+						}
+
+						savedSearchQry = new mainWnd.Item();
+						savedSearchQry.loadAML(savedSearchAmlReplacedParameters);
+						savedSearchQryItems = savedSearchQry.getItemsByXPath("//Item[@type='Activity2' or @type='WBS Element']");
+						savedSearchQryItemCount = savedSearchQryItems.getItemCount();
+
+						searchResultActivity2Ids.length = 0;
+						searchResultWbsElementIds.length = 0;
+
+						for (itemCountIndex = 0; itemCountIndex < savedSearchQryItemCount; itemCountIndex++) {
+							savedSearchQryItem = savedSearchQryItems.getItemByIndex(itemCountIndex);
+
+							if (savedSearchQryItem.getAttribute("isDescriptor") === "true") {
+								continue;
+							}
+
+							savedSearchQryItem.setProperty('proj_num', ProjectPlan.projectNumber);
+							savedSearchQryItem.setPropertyAttribute("proj_num", "condition", "eq");
+
+							savedSearchItemResult = savedSearchQryItem.apply();
+							if (savedSearchItemResult.isError() && !savedSearchItemResult.isEmpty()) {
+								aras.AlertError(savedSearchItemResult);
+								return;
+							}
+
+							typeOfSavedSearchQryItem = savedSearchQryItem.getAttribute("type");
+							savedSearchItemResultNodes = savedSearchItemResult.dom.selectNodes("descendant-or-self::Item[@type='" + typeOfSavedSearchQryItem + "']");
+							if (typeOfSavedSearchQryItem === "Activity2") {
+								for (i = 0; i < savedSearchItemResultNodes.length; i++) {
+									searchResultActivity2Ids.push(savedSearchItemResultNodes[i].getAttribute("id"));
+								}
+							}
+
+							if (typeOfSavedSearchQryItem === "WBS Element") {
+								for (i = 0; i < savedSearchItemResultNodes.length; i++) {
+									searchResultWbsElementIds.push(savedSearchItemResultNodes[i].getAttribute("id"));
+								}
+							}
+						}
+
+						const savedSearchResults = searchResultWbsElementIds.concat(searchResultActivity2Ids);
+						ProjectPlan.savedSearchResults = new Set(savedSearchResults);
+					});
+
+					isSavedSearchRunning = true;
+					executeFilter(true);
+				} else {
+					if (isSavedSearchSetInOnXmlLoaded === false) {
+						clearFilter(true, true);
+					} else {
+						isSavedSearchSetInOnXmlLoaded = false;
+					}
+				}
+			} else {
+				projectView.raiseEvent("onToolbarItemChange", undefined, toolbarItem);
+			}
+		}
+
+		function onToolbarButtonClick(toolbarItem) {
+			if (expandingMode !== "none") return;
+
+			var treeGrid = viewShare.controls.treeGrid;
+			var grid = treeGrid._grid;
+			var buttonId = toolbarItem.getId();
+			var selectedItemIds = treeGrid.getSelectedItemIDs();
+			var isSingleSelection = selectedItemIds.length === 1;
+			var treeGridDom = grid.dom;
+
+			if (isSingleSelection) {
+				var itemId = selectedItemIds[0];
+				var expandedItem = grid.settings.expanded.has(itemId) || grid.rows.get(itemId, 'children') === undefined;
+				var rootItem = grid.roots.indexOf(itemId) >= 0;
+				var notSameLevel = expandedItem || rootItem;
+
+				switch (buttonId) {
+					case "add_wbs_element":
+						addProjectTreeItem(itemId, AddWbsElementStrategy, notSameLevel);
+						break;
+					case "add_activity":
+						addProjectTreeItem(itemId, AddActivity2Strategy, notSameLevel);
+						break;
+					case "add_milestone":
+						addProjectTreeItem(itemId, AddMilestoneStrategy, notSameLevel);
+						break;
+					case "indent":
+						treeGridDom.dispatchEvent(new CustomEvent('indentItem'));
+						onProjectItemMoved();
+						break;
+					case "move_down":
+					case "move_up":
+						var moveDown = buttonId === "move_down";
+						treeGridDom.dispatchEvent(
+							new CustomEvent('moveDownOrUp', {
+								detail: {
+									moveDown: buttonId === "move_down"
+								}
+							})
+						);
+						moveDownOrUpItem(itemId, moveDown);
+						onProjectItemMoved();
+						break;
+					case "outdent":
+						var canOutdent = outdentItem(itemId);
+						if (canOutdent) {
+							treeGridDom.dispatchEvent(new CustomEvent('outdentItem'));
+							onProjectItemMoved();
+						}
+						break;
+					case "open_completion_dialog":
+						setTimeout("openCompletionDialog('" + itemId + "')", 100);
+						break;
+					case "paste":
+						pasteItem({targetId: itemId, clearCopyBuffer: false, notSameLevel: notSameLevel});
+						break;
+					case "view_edit_selected_item":
+						setTimeout("viewEditSelectedItem('" + itemId + "')", 100);
+						break;
+					//START EXPORT TO EXCEL CHANGES
+					case "export_to_excel":
+						exportToExcel();
+						break;
+					//STOP EXPORT TO EXCEL CHANGES
+				}
+			}
+
+			switch (buttonId) {
+				case "add_existing_deliverable":
+					addExistingDeliverable(selectedItemIds[0]);
+					break;
+				case "add_new_deliverable":
+					addNewDeliverable(selectedItemIds[0]);
+					break;
+				case "delete_selected_item":
+					var canDelete = deleteSelectedItem(selectedItemIds);
+					if (canDelete) {
+						treeGridDom.dispatchEvent(new CustomEvent('deleteItem'));
+						onProjectItemMoved();
+					}
+					break;
+				case "expand_all":
+					expandAll();
+					break;
+				case "collapse_all":
+					treeGrid.expandAll(false);
+					break;
+				case "execute_filter":
+					setFlagsAndExecuteFilterOrClearFilter();
+					break;
+				case "clear_filter":
+					clearFilter(false, true);
+					break;
+				case "copy":
+					copyItem(selectedItemIds);
+					break;
+				case "cut":
+					cutItem(selectedItemIds);
+					break;
+				case "execute_scheduling":
+					setTimeout(executeScheduling, 100);
+					break;
+				case "print":
+					preparationGridAndPrint();
+					break;
+				case "show_gantt_chart":
+					showGantt();
+					break;
+				case "export_to_excel":
+					exportToExcel();
+					break;
+			}
+
+			projectView.raiseEvent("onToolbarButtonClick", undefined, toolbarItem);
+		}//onToolbarButtonClick()
+
+		function loadPdfTeeGridControl(treegrid, startY) {
+			var pdfTree;
+			clientControlsFactory.createControl("Aras.Client.Controls.Experimental._gantt.pdfGanttChart.pdfTreeGrid", { treegrid: treegrid, startY: startY }, function (control) { pdfTree = control; });
+			return pdfTree;
+		}
+
+		function loadPdfUtilities() {
+			var pdfUtilities;
+			clientControlsFactory.createControl("Aras.Client.Controls.Experimental._gantt.pdfGanttChart.pdfRenderingUtilities", {}, function (control) { pdfUtilities = control; });
+			return pdfUtilities;
+		}
+
+		function loadPdfGanttChart(gantt, treegrid, dayWidth) {
+			var pdfGanttChart;
+			clientControlsFactory.createControl("Aras.Client.Controls.Experimental._gantt.pdfGanttChart.pdfGanttChart", { gantt: gantt, treegrid: treegrid, dayWidth: dayWidth }, function (control) { pdfGanttChart = control; });
+			return pdfGanttChart;
+		}
+
+		function preparationGridAndPrint() {
+			treeGrid.grid_Experimental.clearCache();
+			const gantt = viewShare.controls.ganttChart;
+			const ganttPanel = gantt ? gantt.ownerPanel : null;
+			const ganttVisible = ganttPanel && ganttPanel.visible;
+
+			const pdfGanttChart = ganttVisible ? loadPdfGanttChart(gantt, treeGrid, gantt.dayWidth) : null;
+			const pdfTreeGrid = loadPdfTeeGridControl(treeGrid, ganttVisible ? 20 : 0 /*shift grid row to  ganttChart row Y level */);
+			const controlsToRender = [pdfTreeGrid, pdfGanttChart];// render confrols left to right, we can change order if need
+
+			const printGantChart = function(jsPDF) {
+				const pdfOption = {
+					unit: "pt",
+					compress: true,
+					orientation: "l",
+					lineWidth: 0.5,
+					format: "a4"
+				};
+				const doc = new jsPDF(pdfOption);
+				const documentProperties = { // todo: fill actual properties from solution
+					"title": "Project",
+					"subject": "GanttChart",
+					"author": "GanttChart",
+					"keywords": "gantt",
+					"creator": "Aras Innovator Project Solution"
+				};
+				doc.setProperties(documentProperties);
+				doc.setDrawColor(0, 0, 0);
+				doc.setLineWidth(0.5);
+				doc.setFontSize(8);// todo: get font size from grid style
+				const langDir = dojoConfig.arasContext.languageDirection;
+				doc.setLangDir(langDir);
+				const utils = loadPdfUtilities();
+				utils.buildPdfDocument(controlsToRender, doc);
+				utils.preparePdfToSave(doc);
+			};
+
+			mainWnd.ModulesManager.using(["aras.innovator.Printing/JsPdfLoader"])
+				.then(function(loader) {
+					loader.loadScripts(printGantChart, ["jspdf.plugin.text.js","jspdf.plugin.bidi.js", "jspdf.plugin.graphics.js"]);
+				});
+		}
+
+		function getReferrersEx(itemNode) {
+			var selectedParent = itemNode.parentNode.parentNode,
+				activitiesToDelete = selectedParent.selectNodes("descendant-or-self::Item[@type='WBS Activity2']/related_id/Item[@type='Activity2'][not(@action='delete')]"),
+				successors = [],
+				cond = "[",
+				activityNode, activityId, referrers,
+				i, j;
+
+			for (i = 0; i < activitiesToDelete.length; i++) {
+				activityNode = activitiesToDelete[i];
+				activityId = activityNode.getAttribute("id");
+				cond += (i > 0 ? " or " : "") + "related_id='" + activityId + "'";
+
+				referrers = getReferrers(activityId); // changed getChain to getReferrers, because of IR-005491
+
+				if (referrers) {
+					for (j = 0; j < referrers.length; j++) {
+						var elem = referrers[j];
+
+						if (seekInArray(successors, elem) === -1) {
+							successors.push(elem);
+						}
+					}
+				}
+			}
+			cond += "]";
+
+			return {successors:successors, condition: cond};
+		}
+
+		function isValidCutCopySelection(itemNodes) {
+			var firstItemType = itemNodes[0].getAttribute("type"),
+				isWbsFirst = (firstItemType === "WBS Element"),
+				itemParent = getItemParentWbs(itemNodes[0]),
+				firstParentId = itemParent ? itemParent.getAttribute("id") : "",
+				parentId, currentItem, i;
+
+			for (i = 1; i < itemNodes.length; i++) {
+				currentItem = itemNodes[i];
+
+				if (currentItem.getAttribute("type") !== firstItemType) {
+					aras.AlertError(aras.getResource("project", "project_tree.invalid_row_selection_not_all_rows_are_same_type"));
+					return false;
+				}
+
+				if (isWbsFirst) {
+					itemParent = getItemParentWbs(currentItem);
+					parentId = itemParent ? itemParent.getAttribute("id") : "";
+
+					if (parentId !== firstParentId) {
+						aras.AlertError(aras.getResource("project", "project_tree.invalid_row_selection_not_same_parent"));
+						return false;
+					}
+				}
+			}
+
+			return true;
+		}
+
+		function copyItem(copyItemIds) {
+			const selectedItems = copyItemIds.map(function(itemId) {
+				return getItemNodeById(itemId);
+			});
+
+			if (!selectedItems.length || !isValidCutCopySelection(selectedItems)) {
+				return Promise.resolve(false);
+			}
+
+			viewShare.properties.copyQryBuffer = null;
+
+			const rowsToUpdate = copyItemIds.map(getBranchAsync);
+			return Promise.all(rowsToUpdate).then(function() {
+				const amlBuffer = copyItemIds.reduce(function(amlBuffer, itemId) {
+					const itemNode = getItemNodeById(itemId);
+					return amlBuffer += itemNode ? itemNode.xml : '';
+				}, '');
+				
+				viewShare.properties.copyQryBuffer = new mainWnd.Item();
+				viewShare.properties.copyQryBuffer.loadAML('<AML><Item type="Method" action="Project_CloneProjectOrTemplate">' + amlBuffer + '</Item></AML>');
+
+				const deliverableNode = viewShare.properties.copyQryBuffer.node.selectSingleNode('//Item[(@type="WBS Element" or @type="Activity2") and not(@action="delete")]/Relationships/Item[@type="WBS Deliverable" or @type="Activity2 Deliverable"]');
+				if (deliverableNode) {
+					return mainWnd.ArasModules.Dialog.confirm(aras.getResource('project', 'project_tree.copy_with_deliverables'));
+				}
+			})
+			.then(function(withDeliverables) {
+				if (withDeliverables === 'ok') {
+					viewShare.properties.copyQryBuffer.setAttribute('projectCloneWithDeliverables', '1');
+				}
+				viewShare.properties.copyQryBuffer.setAttribute('projectCloneMode', 'CreateElements');
+				viewShare.properties.copyQryBuffer.setAttribute('project_number_clone', ProjectPlan.projectNumber);
+				updateMenuActionsState();
+				return true;
+			});
+		}
+
+		function cutItem(cutItemIds, refreshGrid) {
+			if (cutItemIds.length) {
+				var selectedItems = [],
+					itemNode,
+					i;
+
+				refreshGrid = (refreshGrid !== undefined) ? Boolean(refreshGrid) : true;
+				viewShare.properties.copyQryBuffer = null;
+
+				for (i = 0; i < cutItemIds.length; i++) {
+					itemNode = getItemNodeById(cutItemIds[i]);
+					selectedItems.push(itemNode);
+				}
+
+				if (!isValidCutCopySelection(selectedItems)) {
+					return false;
+				}
+
+				viewShare.properties.cutSelectedItemsBuffer = selectedItems;
+
+				if (refreshGrid) {
+					markGray(cutItemIds);
+					updateMenuActionsState();
+				}
+
+				return true;
+			}
+		}
+
+		function pasteItem(options) {
+			const notSameLevel = options.notSameLevel;
+			const previousAction = viewShare.properties.cutSelectedItemsBuffer ? 'cut' : 'copy';
+			const pastedItems = updateItemOnPaste(options.targetId, options.clearCopyBuffer, notSameLevel);
+			const grid = treeGrid._grid;
+			grid.dom.dispatchEvent(new CustomEvent('pasteItem', {
+				detail: {
+					items: pastedItems,
+					action: previousAction,
+					targetId: options.targetId
+				}
+			}));
+			onProjectItemMoved();
+		}
+
+		function updateItemOnPaste(rowId, isNeedToClearCopyBuffer, notSameLevel) {
+			if (!viewShare.properties.cutSelectedItemsBuffer && !viewShare.properties.copyQryBuffer) {
+				return;
+			}
+
+			var buffer;
+			if (viewShare.properties.cutSelectedItemsBuffer) {
+				var amlBuffer = "",
+					itemNode,
+					removedNode;
+
+				buffer = new mainWnd.Item();
+				for (i = 0; i < viewShare.properties.cutSelectedItemsBuffer.length; i++) {
+					itemNode = viewShare.properties.cutSelectedItemsBuffer[i];
+
+					relinkPrevItemOnDelete(itemNode);
+					removedNode = deleteLinkRelationship(itemNode.parentNode.parentNode);
+					amlBuffer += removedNode.xml;
+				}
+				buffer.loadAML("<Item type='To Paste Elements Result'><Relationships>" + amlBuffer + "</Relationships></Item>");
+				viewShare.properties.cutSelectedItemsBuffer = null;
+			}
+			else {
+				buffer = viewShare.properties.copyQryBuffer.apply();
+				if (isNeedToClearCopyBuffer) {
+					viewShare.properties.copyQryBuffer = null;
+				}
+
+				if (buffer.isError()) {
+					aras.AlertError(buffer);
+					return false;
+				}
+
+				if (buffer.getAttribute("projectCloneWithDeliverables") === "1") {
+					ProjectPlan.projectItem.setAttribute('isNeedFixDeliverables', '1');
+				}
+			}
+
+			var i,
+				elements = buffer.getRelationships(),
+				elementsLength = elements.getItemCount(),
+				elementNode,
+				elementType,
+				selectedItem = getItemNodeById(rowId),
+				isSelectedItemWbsElementType = selectedItem.getAttribute("type") === "WBS Element",
+				addedElement,
+				addedRelatedItem,
+				addedItemIds = [],
+				parentWbs,
+				//predecessors vars
+				predecessors,
+				iPredecessor,
+				curPred,
+				predId,
+				predAct;
+
+			for (i = elementsLength - 1; i >= 0; i--) {
+				elementNode = elements.getItemByIndex(i).node;
+				addedItemIds[i] = elementNode.getAttribute("id");
+
+				//predecessors logic (to remove it if action of Activity2 is delete)
+				predecessors = elementNode.selectNodes("Relationships/Item[@type='Predecessor']");
+
+				for (iPredecessor = 0; iPredecessor < predecessors.length; iPredecessor++) {
+					curPred = predecessors[iPredecessor];
+					predId = aras.getItemProperty(curPred, "related_id");
+					predAct = getItemNodeById(predId, true, "Activity2", true);
+
+					if (predAct && predAct.getAttribute("action") === "delete") {
+						deleteItemNode(curPred);
+					}
+				}
+
+				elementType = elementNode.getAttribute("type");
+
+				parentWbs = getItemParentWbs(selectedItem);
+				if (isSelectedItemWbsElementType && notSameLevel) {
+					if ("WBS Element" === elementType) {
+
+						if (parentWbs) {
+							addedElement = addLinkRelationship(parentWbs, "Sub WBS", elementNode, "below", selectedItem);
+						}
+						else {
+							addedElement = addLinkRelationship(selectedItem, "Sub WBS", elementNode, "first", selectedItem);
+						}
+					}
+					else {
+						addedElement = addLinkRelationship(selectedItem, "WBS Activity2", elementNode, "first");
+					}
+				}
+				else {
+					if ("WBS Element" !== elementType) {
+						addedElement = addLinkRelationship(parentWbs, "WBS Activity2", elementNode, "below", selectedItem);
+					}
+					else {
+						addedElement = addLinkRelationship(parentWbs, "Sub WBS", elementNode, "below", selectedItem);
+					}
+				}
+
+				addedRelatedItem = addedElement.selectSingleNode("related_id/Item");
+				relinkPrevItemOnAdd(addedRelatedItem);
+				sortItems(addedRelatedItem);
+			}
+
+			return addedItemIds;
+		}
+
+		function indentItem(itemId) {
+			if (itemId) {
+				const selectedWbs = getItemNodeById(itemId, false, 'WBS Element');
+
+				if (selectedWbs) {
+					var selectedSub = selectedWbs.parentNode.parentNode,
+						aboveSub = selectedSub.selectSingleNode("preceding-sibling::Item[@type='Sub WBS' and not(@action='delete')][1]");
+
+					if (!aboveSub) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_indent_wbs_not_has_not_root_wbs_above"));
+						return;
+					}
+					else {
+						var aboveWbs = aboveSub.selectSingleNode("related_id/Item");
+
+						relinkPrevItemOnDelete(selectedWbs);
+
+						var removedWbs = deleteLinkRelationship(selectedSub);
+						var added = addLinkRelationship(aboveWbs, "Sub WBS", removedWbs, "last");
+						var addedItem = added.selectSingleNode("related_id/Item");
+						relinkPrevItemOnAdd(addedItem);
+						updateWbsIndex(selectedWbs, false, true);
+					}
+				}
+			}
+		}
+
+		function canIndentItem(itemId) {
+			if (itemId) {
+				const selectedWbs = getItemNodeById(itemId, false, 'WBS Element');
+
+				if (selectedWbs) {
+					var selectedSub = selectedWbs.parentNode.parentNode,
+						aboveSub = selectedSub.selectSingleNode("preceding-sibling::Item[@type='Sub WBS' and not(@action='delete')][1]");
+
+					if (!aboveSub) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_indent_wbs_not_has_not_root_wbs_above"));
+						return;
+					}
+
+					return aboveSub.selectSingleNode("related_id/Item").getAttribute("id");
+				}
+			}
+		}
+
+		function outdentItem(itemId) {
+			if (itemId) {
+				const selectedWbs = getItemNodeById(itemId, false, 'WBS Element');
+
+				if (selectedWbs) {
+					var selectedSub = selectedWbs.parentNode.parentNode,
+						parentWbs = getItemParentWbs(selectedWbs),
+						grandParentWbs, removedWbs, added;
+
+					if (!parentWbs) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_find_parent_of_wbs", itemId));
+						return;
+					}
+
+					if (parentWbs.getAttribute("id") === wbsId) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_outdent_to_root_level"));
+						return;
+					}
+
+					grandParentWbs = getItemParentWbs(parentWbs);
+					if (!grandParentWbs) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_find_parent_of_parent_of_WBS", itemId));
+						return;
+					}
+
+					relinkPrevItemOnDelete(selectedWbs);
+					removedWbs = deleteLinkRelationship(selectedSub);
+					added = addLinkRelationship(grandParentWbs, "Sub WBS", removedWbs, "below", parentWbs);
+					updateWbsIndex(selectedWbs, false, true);
+					relinkPrevItemOnAdd(added.selectSingleNode("related_id/Item"));
+
+					return true;
+				}
+			}
+		}
+
+		function moveDownOrUpItem(itemId, moveDown) {
+			if (itemId) {
+				var itemNode = getItemNodeById(itemId);
+
+				if (itemNode) {
+					var moveDownNd,
+						moveUpNd;
+
+					if (moveDown) {
+						moveUpNd = getSibling(itemNode, true, true);
+						moveDownNd = itemNode.selectSingleNode("parent::related_id/parent::Item");
+					}
+					else {
+						moveUpNd = itemNode.selectSingleNode("parent::related_id/parent::Item");
+						moveDownNd = getSibling(itemNode, false, true);
+					}
+
+					if (moveUpNd && moveDownNd) {
+						var parentNode = moveUpNd.parentNode,
+							bottomNode = getSibling(moveUpNd, true, false);
+
+						parentNode.insertBefore(moveUpNd, moveDownNd);
+						parentNode.insertBefore(moveDownNd, bottomNode);
+
+						var movedDownNd = getItemForEdit(moveDownNd.selectSingleNode("related_id/Item"));
+						var movedUpNd = getItemForEdit(moveUpNd.selectSingleNode("related_id/Item"));
+						var prevItemOfMovedDownNd = aras.getItemProperty(movedDownNd, "prev_item");
+
+						aras.setItemProperty(movedDownNd, "prev_item", movedUpNd.getAttribute("id"));
+						aras.setItemProperty(movedUpNd, "prev_item", prevItemOfMovedDownNd);
+						if (bottomNode) {
+							var notMovedNd = getItemForEdit(bottomNode.selectSingleNode("related_id/Item"));
+							aras.setItemProperty(notMovedNd, "prev_item", movedDownNd.getAttribute("id"));
+						}
+					}
+				}
+			}
+		}
+
+		function loadFullTreeImplementation() {
+			if (!treeIsFullyLoaded) {
+				var resWbs = queryBranch(wbsId, -2, false); //select all levels of preject tree in one request
+
+				if (resWbs) {
+					var _wbs = ProjectPlan.projectItem.selectSingleNode("wbs_id/Item");
+
+					if (_wbs) {
+						aras.mergeItem(_wbs, resWbs);
+					}
+					else {
+						viewShare.properties.wbs = ProjectPlan.projectItem.selectSingleNode("wbs_id");
+						viewShare.properties.wbs.text = "";
+						viewShare.properties.wbs = viewShare.properties.wbs.appendChild(resWbs.cloneNode(true));
+						aras.mergeItem(viewShare.properties.wbs, resWbs);
+					}
+				}
+				else {
+					return;
+				}
+
+				treeIsFullyLoaded = true;
+			}
+		}//loadFullTreeImplementation()
+
+		function loadFullProjectTree(skipEvent) {
+			//It makes sence to keep Project AML configuration and treegridApplet in sync.
+			if (!treeIsFullyLoaded) {
+				loadFullTreeImplementation();
+
+				if (!skipEvent) {
+					projectView.raiseEvent("onProjectItemChanged", undefined, wbsId, "updated");
+				}
+			}
+		}
+
+		// gets projectTree branch from server
+		function queryBranch(id, level, doRemoveRedundant) {
+			level = level || treeLevelsConst;
+			doRemoveRedundant = (doRemoveRedundant === undefined) ? true : doRemoveRedundant;
+
+			var treeLoadXml = ProjectPlan.getTreeLoadXml(level);
+			if (!treeLoadXml || !treeLoadXml.xml) {
+				aras.AlertError(aras.getResource("project", "project_tree.treeloadxml_not_initialized"));
+				return;
+			}
+
+			var queryItem = new mainWnd.Item(),
+				queryResult,
+				resultItem;
+
+			queryItem.loadAML(treeLoadXml.xml);
+			queryItem.setID(id);
+			queryResult = queryItem.apply();
+
+			if (!queryResult.isError()) {
+				resultItem = queryResult.getItemByIndex(0).node;
+			}
+
+			if (resultItem) {
+				if (doRemoveRedundant) {
+					removeRedundant(resultItem, level);
+				}
+				sortItems(resultItem);
+			}
+			else {
+				aras.AlertError(aras.getResource("project", "project_tree.error_applying_query_can_not_get_item", id));
+			}
+			return resultItem;
+		}
+
+		function asyncQueryBranch(id, level, doRemoveRedundant) {
+			level = level || treeLevelsConst;
+			doRemoveRedundant = (doRemoveRedundant === undefined) ? true : doRemoveRedundant;
+
+			const treeLoadXml = ProjectPlan.getTreeLoadXml(level);
+			if (!treeLoadXml || !treeLoadXml.xml) {
+				return aras.AlertError(aras.getResource("project", "project_tree.treeloadxml_not_initialized"));
+			}
+
+			const queryItem = aras.createXMLDocument();
+			queryItem.loadXML(treeLoadXml.xml);
+			queryItem.firstChild.setAttribute('id', id);
+			
+			return ArasModules.soap(queryItem.xml, {async: true})
+				.then(function(resultNode) {
+					if (resultNode) {
+						const resultItem = resultNode.firstChild;
+						if (doRemoveRedundant) {
+							removeRedundant(resultItem, level);
+						}
+						sortItems(resultItem);
+
+						return resultItem;
+					}
+
+					return aras.AlertError(aras.getResource("project", "project_tree.error_applying_query_can_not_get_item", id));
+				});
+		}
+
+		function getBranch(node, deep) {
+			// adds to node all possible levels
+			const lastNodesXPath = getXPathForLastNodes();
+			const nodesToCheck = node.selectNodes("descendant-or-self::Item[@type='WBS Element'][not(Relationships/* or @action='add' or action='delete')]");
+
+			for (let i = 0; i < nodesToCheck.length; i++) {
+				recursiveLoad(nodesToCheck[i], deep, lastNodesXPath);
+			}
+		}
+
+		function getBranchAsync(itemId) {
+			const grid = treeGrid._grid;
+			const treeLoadXml = ProjectPlan.getTreeLoadXml(-2);
+			const rowsToDownload = treeGrid.getRowIdsToDownload(itemId);
+			const queryItem = ArasModules.xml.parseString(treeLoadXml.xml);
+			let queryXml = rowsToDownload.reduce(function(queryXml, itemId) {
+				grid.settings.expanded.add(itemId);
+				treeGrid.disabledRows.add(itemId)
+				queryItem.firstChild.setAttribute('id', itemId);
+				return queryXml += queryItem.xml;
+			}, '');
+
+			let queryPromise;
+			if (queryXml) {
+				grid.render();
+				updateMenuActionsState();
+				queryXml = '<AML>' + queryXml + '</AML>';
+				queryPromise = ArasModules.soap(queryXml, {method: 'ApplyAML'});
+			} else {
+				queryPromise = Promise.resolve();
+			}
+
+			return queryPromise.then(function(resultNode) {
+				if (!resultNode) {
+					return;
+				}
+
+				const loadedItems = ArasModules.xml.selectNodes(resultNode, './Item');
+				rowsToDownload.forEach(function(itemId, index) {
+					grid.settings.expanded.delete(itemId);
+					treeGrid.disabledRows.delete(itemId);
+					let nodeToUpdate = getItemNodeById(itemId);
+					const resultItem = loadedItems[index];
+					sortItems(resultItem);
+					aras.mergeItem(nodeToUpdate, resultItem);
+					const rows = makeBranch(nodeToUpdate, itemId);
+					if (rows) {
+						const branchRow = rows.get(itemId);
+						grid.rows.set(itemId, branchRow.children, 'children');
+						rows.delete(itemId);
+						rows.forEach(function(row, rowId) {
+							grid.rows._store.set(rowId, row);
+						});
+						treeGrid.updateIndexTreeBranch(itemId);
+						const branchMetadata = grid.actions._calcRowsMetadata(grid.settings.indexTreeRows, itemId);
+						Object.assign(grid.metadata, branchMetadata);
+					}
+				});
+
+				grid.render();
+				updateMenuActionsState();
+			});
+		}
+
+		function recursiveLoad(node, deep, lastNodesXPath) {
+			var newNode = loadBranch(node, deep),
+				nodesToLoad = newNode.selectNodes(lastNodesXPath),
+				i;
+
+			for (i = 0; i < nodesToLoad.length; i++) {
+				recursiveLoad(nodesToLoad[i], deep, lastNodesXPath);
+			}
+		}
+
+		function loadBranch(node, deep) {
+			// adds to node deep number of levels
+			deep = deep || treeLevelsConst;
+
+			var nodeId = node.getAttribute("id"),
+				res = queryBranch(nodeId, deep),
+				newNode = res.cloneNode(true);
+
+			node.parentNode.replaceChild(newNode, node);
+			return newNode;
+		}
+
+		function removeRedundant(node, level) {
+			var xpath = getXPathForLastNodes(null, level),
+				lastNodes = node.selectNodes(xpath),
+				lastNode, itemsToRemove, relationshipsToRemove,
+				i, j;
+
+			for (i = 0; i < lastNodes.length; i++) {
+				lastNode = lastNodes[i];
+				itemsToRemove = lastNode.selectNodes("Relationships/Item[@type!='WBS Deliverable']");
+
+				for (j = 0; j < itemsToRemove.length; j++) {
+					itemsToRemove[j].parentNode.removeChild(itemsToRemove[j]);
+				}
+
+				relationshipsToRemove = node.selectNodes("descendant::Relationships[not(*)]");
+				for (j = 0; j < relationshipsToRemove.length; j++) {
+					relationshipsToRemove[j].parentNode.removeChild(relationshipsToRemove[j]);
+				}
+			}
+		}
+
+		function getXPathForLastNodes(withoutDeleted, level) {
+			var cond = "[not(@pt_filtered)]" + (withoutDeleted ? "[not(@action='delete')]" : ""),
+				lastNodesXPath = "",
+				i;
+
+			level = level || treeLevelsConst;
+			for (i = 0; i < level; i++) {
+				lastNodesXPath += "Relationships/Item[@type='Sub WBS']" + cond + "/related_id/Item" + cond + "/";
+			}
+
+			lastNodesXPath = lastNodesXPath.substr(0, lastNodesXPath.length - 1);
+			return lastNodesXPath;
+		}
+
+		/*
+		setLeader
+		-----------
+		params:
+		itemNode - activity2
+		keyedName - keyed_name of leader, must be null if id used
+		id - id of leader, must be null if keyed_name used
+		result:
+		returns keyed_name of set assignee
+		*/
+		function setLeader(itemNode, keyedName) {
+			var identityItem = findIdentityByKeyedName(keyedName),
+				appliedValue = "";
+
+			if (itemNode && identityItem) {
+				var currentLeaderId = aras.getItemProperty(itemNode, "managed_by_id"),
+					newLeaderId = identityItem.getAttribute("id");
+
+				appliedValue = aras.getItemProperty(identityItem, "keyed_name");
+
+				if (currentLeaderId != newLeaderId) {
+					aras.setItemProperty(itemNode, "managed_by_id", newLeaderId);
+					aras.setItemPropertyAttribute(itemNode, "managed_by_id", "keyed_name", appliedValue);
+				}
+			}
+
+			return appliedValue;
+		}
+
+		function findIdentityByKeyedName(keyedName) {
+			var identityItem = null;
+
+			if (keyedName) {
+				keyedName = keyedName.toLowerCase();
+
+				if (identitiesCache[keyedName]) {
+					identityItem = identitiesCache[keyedName];
+				}
+				else {
+					identityItem = aras.uiGetItemByKeyedName("Identity", keyedName);
+					identitiesCache[keyedName] = identityItem;
+				}
+			}
+
+			return identityItem;
+		}
+
+		function setEditMode(item) {
+			actNums = null;
+
+			//TODO: improve projectItem setting
+			ProjectPlan.projectItem = item;
+			projectView.item = item;
+			treeIsFullyLoaded = isDirty();
+
+			queryCache = new ptCache();
+			//clearFilter(false, false);
+			viewShare.properties.cutSelectedItemsBuffer = null;
+			aras.getItemRelationships('Project', ProjectPlan.projectId, 'Project Team');
+
+			projectView.isEditMode = true;
+		}
+
+		function setViewMode(item) {
+			actNums = null;
+			treeIsFullyLoaded = false;
+
+			ProjectPlan.projectItem = item;
+			projectView.item = item;
+			//clearFilter(false, false);
+
+			projectView.isEditMode = false;
+		}
+
+		function onTabSelected() {
+			if (ProjectPlan.projectItemType === 'Project') {
+				initProjTeamElems(true);
+			}
+		}
+
+		function validateScheduleProperty(editItem, rowId, headId, newValue) {
+			let dateStart, newFinishDate;
+
+			switch (headId) {
+				case 'planStart':
+					const es = aras.getItemProperty(editItem, "date_es");
+					if (compareDates(newValue, es) === -1) { // start < es
+						const itemPredecessors = editItem.selectNodes("Relationships/Item[@type='Predecessor'][not(@action='delete')]");
+						if (itemPredecessors.length) {
+							controlTurnEditOff();
+							return mainWnd.ArasModules.Dialog.confirm(aras.getResource("project", "project_tree.remove_predecessor_or_cancel"))
+								.then(function(result) {
+									if (result === 'ok') {
+										setCellValue(rowId, 'predecessor', '');
+										return newValue;
+									}
+
+									return Promise.reject();
+								});
+						}
+					}
+					const expectedDuration = aras.getItemProperty(editItem, "expected_duration");
+					if (aras.getItemProperty(editItem, "date_due_sched")) {
+						newFinishDate = incDate(newValue, ((expectedDuration === '0') ? 0 : expectedDuration - 1));
+						setCellValue(rowId, 'planFinish', newFinishDate);
+					}
+					setCellValue(rowId, 'duration', expectedDuration);
+					break;
+				case 'planFinish':
+					if (aras.getItemProperty(editItem, 'is_milestone') === '1') {
+						setCellValue(rowId, 'planStart', newValue);
+						setCellValue(rowId, 'duration', '0');
+						break;
+					}
+
+					dateStart = aras.getItemProperty(editItem, "date_start_sched");
+					if (!dateStart) {
+						break;
+					}
+
+					const newDuration = diffDates(dateStart, newValue);
+					if (newDuration < 0) {
+						return Promise.reject(aras.getResource('project', 'project_tree.can_not_change_to_negative_duration'));
+					} else {
+						newValue = newDuration === 0 ? dateStart : newValue;
+						setCellValue(rowId, 'duration', newDuration + 1);
+					}
+					break;
+				case 'duration':
+					dateStart = aras.getItemProperty(editItem, 'date_start_sched');
+					const dateFinish = aras.getItemProperty(editItem, 'date_due_sched');
+					if (!dateStart || !dateFinish) {
+						break;
+					}
+
+					const schedulingType = aras.getItemProperty(ProjectPlan.projectItem, 'scheduling_type');
+					if (schedulingType === 'Forward') {
+						newFinishDate = incDate(dateStart, (newValue === '0') ? 0 : newValue - 1);
+						setCellValue(rowId, 'planFinish', newFinishDate);
+					} else {
+						const newStartDate = decDate(dateFinish, (newValue === '0') ? 0 : newValue - 1);
+						setCellValue(rowId, 'planStart', newStartDate);
+					}
+					break;
+			}
+
+			return Promise.resolve(newValue);
+		}
+
+		function setDirty() {
+			ProjectPlan.projectItem.setAttribute('isDirty', '1');
+		}
+
+		function isDirty() {
+			const projectItem = ProjectPlan.projectItem;
+			const result = aras.isDirtyEx(projectItem);
+
+			return result || projectItem.selectSingleNode('descendant-or-self::Item[@action and @action!= "get" and @action!= "skip"]');
+		}
+
+		///Obrect represent simple access to predecessor's properties and validation of predecessors in "Predecessor" column
+		///param[1] string: text representation of predecessor
+		function Predecessor(pred) {
+			this.textRepresentation = pred;
+			this.reg_exp = /^([0-9]+)(SS|SF|FS|FF)?((\+|\-)[0-9]+)?$/;
+		}
+
+		Predecessor.prototype.IsValidity = function () {
+			return this.reg_exp.test(this.textRepresentation);
+		};
+
+		Predecessor.prototype.GetNumber = function () {
+			var arr = this.reg_exp.exec(this.textRepresentation);
+			return arr[1];
+		};
+
+		Predecessor.prototype.GetPrecedenceType = function () {
+			var arr = this.reg_exp.exec(this.textRepresentation);
+
+			if (arr[2]) {
+				switch (arr[2]) {
+					case "SS": return "Start to Start";
+					case "SF": return "Start to Finish";
+					case "FF": return "Finish to Finish";
+					default: return "Finish to Start";
+				}
+			}
+			else {
+				return "Finish to Start";
+			}
+		};
+
+		Predecessor.prototype.GetPrecedenceShortType = function () {
+			var arr = this.reg_exp.exec(this.textRepresentation);
+
+			return arr[2] || '';
+		};
+
+		Predecessor.prototype.GetLeadLag = function () {
+			var arr = this.reg_exp.exec(this.textRepresentation);
+			return arr[3] || 0;
+		};
+
+		function checkPredecessor(rowId, propertyValue) {
+			var checkResult = { isValid: true, errorMessage: "" };
+
+			if (propertyValue) {
+				var predList = propertyValue.split(","),
+					currentPredecessor, predecessorNumber,
+					distinct = [],
+					nextStep = [],
+					nextStepExists = true,
+					circularRefExists = false,
+					curStep, predIds, itemId, i, j;
+
+				for (i = 0; i < predList.length; i++) {
+					currentPredecessor = new Predecessor(predList[i]);
+
+					if (!currentPredecessor.IsValidity()) {
+						checkResult.errorMessage = aras.getResource("project", "project_tree.invalid_predecessor");
+					}
+					else {
+						predecessorNumber = currentPredecessor.GetNumber();
+
+						if (predecessorNumber.search(/\d/) === -1) {
+							checkResult.errorMessage = aras.getResource("project", "project_tree.not_number_between_commas");
+						}
+						else if (!checkActNum(predecessorNumber)) {
+							checkResult.errorMessage = aras.getResource("project", "project_tree.number_of_predecessor_out_of_range_of_possible_values");
+						}
+						else if (getActNum(rowId) == predecessorNumber) {
+							checkResult.errorMessage = aras.getResource("project", "project_tree.predecessor_can_not_link_activity_with_sel");
+						}
+						else if (distinct[predecessorNumber]) {
+							checkResult.errorMessage = aras.getResource("project", "project_tree.can_not_be_more_than_one_same_predecessors")
+						}
+					}
+
+					if (checkResult.errorMessage) {
+						// if error was found
+						checkResult.isValid = false;
+						return checkResult;
+					}
+					else {
+						distinct[predecessorNumber] = true;
+						nextStep[nextStep.length] = getActIdByNum(predecessorNumber);
+					}
+				}
+
+				curStep = nextStep;
+				loadFullTreeImplementation();
+				//+++breadth-first search, check for non-cyclic
+				//curStep - enum of Activities (starts from Predecessors of edited Activity)
+				//nextStep - enum of Predecessors for curStep Activities
+				nextStepExists = true;
+				circularRefExists = false;
+				while (nextStepExists) {
+					nextStepExists = false;
+					nextStep = [];
+					//run step
+					for (i = 0; i < curStep.length; i++) {
+						predId = curStep[i];
+						predIds = getPredecessors(predId);
+
+						for (j = 0; j < predIds.length; j++) {
+							itemId = predIds[j];
+
+							if (itemId == rowId) {
+								nextStepExists = false;
+								circularRefExists = true;
+								break;
+							}
+
+							if (seekInArray(nextStep, itemId) === -1) {
+								nextStep[nextStep.length] = itemId;
+							}
+						}
+
+						if (circularRefExists) {
+							break;
+						}
+						nextStepExists = nextStepExists || (nextStep.length > 0);
+					}
+					curStep = nextStep;
+				}
+
+				//---breadth-first search, check for non-cyclic
+				if (circularRefExists) {
+					checkResult.isValid = false;
+					checkResult.errorMessage = aras.getResource("project", "project_tree.trying_link_task_has_task_links_to_first_task");
+				}
+			}
+
+			return checkResult;
+		}
+
+		function getItemNodeById(id, includeDeleted, itemType, silentMode) {
+			var additionalCriteria = !includeDeleted ? "[not(@action='delete')]" : "",
+				resultNode = null;
+
+			if (itemType) {
+				if (itemType === "WBS Element") {
+					resultNode = viewShare.properties.wbs.selectSingleNode("descendant-or-self::Item[@type='WBS Element'][@id='" + id + "']" + additionalCriteria);
+				}
+				else if (itemType === "Activity2") {
+					resultNode = viewShare.properties.wbs.selectSingleNode("descendant::Item[@type='WBS Activity2']/related_id/Item[@type='Activity2'][@id='" + id + "']" + additionalCriteria);
+				}
+
+				if (!resultNode) {
+					if (!silentMode) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_find_item_of_type_with_id", itemType, id));
+					}
+					return null;
+				}
+			}
+			else {
+				resultNode = viewShare.properties.wbs.selectSingleNode("descendant-or-self::Item[@id='" + id + "']" + additionalCriteria);
+
+				if (!resultNode) {
+					if (!silentMode) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_find_item_with_id_removedFrom", id));
+					}
+					return null;
+				}
+
+				if (resultNode.getAttribute("type") === "Activity2") {
+					parentItem = resultNode.parentNode.parentNode;
+
+					if (parentItem.getAttribute("type") !== "WBS Activity2") {
+						resultNode = viewShare.properties.wbs.selectSingleNode("descendant::Item[@type='WBS Activity2']/related_id/Item[@type='Activity2'][@id='" + id + "']" + additionalCriteria);
+					}
+				}
+			}
+
+			return resultNode;
+		}
+
+		function getReferrers(itemId, excludeIds, searchOnClient) {
+			var excludeCondition = "",
+				excludeAmlCondition = "",
+				foundReferrers = [],
+				sourceItem, sourceId, i;
+
+			if (excludeIds && excludeIds.length) {
+				excludeAmlCondition = "<and>";
+
+				for (i = 0; i < excludeIds.length; i++) {
+					excludeId = excludeIds[i];
+					excludeCondition += "[@id!='" + excludeId + "']";
+					excludeAmlCondition += '<source_id condition= "ne">' + excludeId + '</source_id>';
+				}
+				excludeAmlCondition += "</and>";
+			}
+
+			if (searchOnClient) {
+				var preds = viewShare.properties.wbs.selectNodes("descendant::Item[@type='Activity2']" + excludeCondition + "/Relationships/Item[@type='Predecessor'][not(@action='delete')][related_id='" + itemId + "']");
+
+				for (i = 0; i < preds.length; i++) {
+					sourceItem = preds[i].parentNode.parentNode;
+					sourceId = sourceItem.getAttribute("id");
+
+					foundReferrers.push(sourceId);
+				}
+			}
+			else {
+				var refferers, addedPreds;
+
+				if (queryCache.links.from[itemId]) {
+					refferers = queryCache.links.from[itemId];
+				}
+				else {
+					var queryItem = new mainWnd.Item();
+					var queryXml = '<Item type= "Predecessor" action= "get" select= "source_id">' +
+							'<related_id>' + itemId + '</related_id>' +
+							excludeAmlCondition +
+						'</Item>';
+
+					queryItem.loadAML(queryXml);
+					refferers = queryItem.apply();
+
+					if (refferers.isError() && !refferers.isEmpty()) {
+						aras.AlertError(aras.getResource("project", "project_tree.iom_apply_gets_ fault"));
+						return;
+					}
+
+					if (!refferers.isEmpty()) {
+						queryCache.links.from[itemId] = refferers;
+					}
+					else {
+						refferers = null;
+					}
+				}
+
+				if (refferers) {
+					var itemNode, nodeId, isDeleted;
+
+					for (i = 0; i < refferers.getItemCount(); i++) {
+						itemNode = refferers.getItemByIndex(i).node;
+						nodeId = itemNode.getAttribute("id");
+						sourceId = aras.getItemProperty(itemNode, "source_id");
+						isDeleted = viewShare.properties.wbs.selectSingleNode("descendant::Item[@type='Predecessor'][@action='delete'][@id='" + nodeId + "']");
+
+						if (!isDeleted) {
+							foundReferrers.push(sourceId);
+						}
+					}
+				}
+
+				addedPreds = viewShare.properties.wbs.selectNodes("descendant::Item[@type='Activity2']" + excludeCondition + "/Relationships/Item[@type='Predecessor'][@action='add'][related_id='" + itemId + "']");
+
+				for (i = 0; i < addedPreds.length; i++) {
+					sourceItem = addedPreds[i].parentNode.parentNode;
+					sourceId = sourceItem.getAttribute("id");
+
+					foundReferrers.push(sourceId);
+				}
+			}
+
+			return foundReferrers;
+		}
+
+		// seek for arr[] == elem or arr[].prop == elem
+		function seekInArray(arr, elem, prop) {
+			if (prop) {
+				for (var i = 0; i < arr.length; i++) {
+					if (arr[i][prop] == elem) {
+						return i;
+					}
+				}
+			}
+			else {
+				for (var i = 0; i < arr.length; i++) {
+					if (arr[i] == elem) {
+						return i;
+					}
+				}
+			}
+
+			return -1;
+		}
+
+		function getCellLabel(itemNode, columnIndex, useTreeDom) {
+			return getItemFieldValueOrLabel(itemNode, columnIndex, useTreeDom, false);
+		}
+
+		function getCellValue(itemNode, columnIndex, useTreeDom) {
+			return getItemFieldValueOrLabel(itemNode, columnIndex, useTreeDom, true);
+		}
+
+		function getItemFieldValueOrLabel(itemNode, columnIndex, useTreeDom, isValue) {
+			/* result {retValue, aloneDeliv, isMilestone} */
+			var itemId = itemNode.getAttribute("id"),
+				itemType = itemNode.getAttribute("type"),
+				ret = {},
+				retVal = "",
+				propDt, propPtrn;
+
+			if (useTreeDom) {
+				var tr = treeDOM.selectSingleNode("descendant::tr[@id='" + itemId + "']");
+				var tds = tr.selectNodes("td");
+
+				retVal = tds[columnIndex].text;
+			}
+			else {
+				var hasAsmnts = itemNode.selectSingleNode("Relationships/Item[@type='Activity2 Assignment' and string(@action)!='delete']");
+
+				switch (columnIndex) {
+					case fld["tree_node"]:
+						retVal = aras.getItemProperty(itemNode, "name");
+						break;
+					case fld["n"]:
+						if (itemType !== "WBS Element") retVal = getActNum(itemId);
+						break;
+					case fld["predecessor"]:
+						if (itemType === "WBS Element") {
+							break;
+						}
+						var preds = ArasModules.xml.selectNodes(itemNode, "Relationships/Item[@type='Predecessor'][not(@action='delete')]");
+						if (isValue) {
+							retVal = preds.reduce(function(predString, predItem, index) {
+								var shortPredReg = /^(F|S)(?:.*)(F|S)/;
+								var leadLagReg = /^(\+|\-)?[0-9]+$/;
+								var predId = aras.getItemProperty(predItem, 'related_id');
+								var shortPredType = aras.getItemProperty(predItem, 'precedence_type')
+									.match(shortPredReg)
+									.splice(1, 2)
+									.join('');
+								var leadLag = aras.getItemProperty(predItem, 'lead_lag')
+									.match(leadLagReg);
+
+								if (leadLag && leadLag[0] && leadLag[0] !== '0') {
+									leadLag = leadLag[1] ? leadLag[0] : '+' + leadLag[0];
+								} else {
+									shortPredType = shortPredType === 'FS' ? '' : shortPredType;
+									leadLag = '';
+								}
+
+								// 6DB23254D47A433BAEC84581F87FDCF6|FS|+2,10315EF715144B72888DA8A96168D7DC||
+								return predString + (index > 0 ? ',' : '')  + predId + '|' + shortPredType + '|' + leadLag;
+							}, retVal);
+						} else {
+							retVal = preds.reduce(function(predString, predItem, index) {
+								var predId = aras.getItemProperty(predItem, 'related_id');
+								return predString + (index > 0 ? ',' : '') + getActNum(predId);
+							}, retVal);
+						}
+						break;
+					case fld["status"]:
+						if (itemType !== "WBS Element") {
+							var tmpPropNm = (hasAsmnts) ? "rollup_percent_compl" : "percent_compl";
+
+							retVal = aras.getItemProperty(itemNode, tmpPropNm) || "0";
+						}
+						break;
+					case fld["leader"]:
+						if (itemType !== "WBS Element") {
+							var leaderName = itemNode.selectSingleNode("managed_by_id");
+
+							retVal = (leaderName) ? (leaderName.getAttribute("keyed_name") || '') : "";
+						}
+						break;
+					case fld["plan_start"]:
+						var propNm = (itemType === "WBS Element" ? "rollup_date_sched_start" : "date_start_sched");
+
+						retVal = aras.getItemProperty(itemNode, propNm);
+						propPtrn = getDatePropertyPattern(itemType, propNm);
+						break;
+					case fld["plan_finish"]:
+						var propNm = (itemType === "WBS Element" ? "rollup_date_sched_due" : "date_due_sched");
+
+						retVal = aras.getItemProperty(itemNode, propNm);
+						propPtrn = getDatePropertyPattern(itemType, propNm);
+						break;
+					case fld["duration"]:
+						if (itemType === "WBS Element") {
+							retVal = aras.getItemProperty(itemNode, "rollup_duration");
+						}
+						else {
+							var isMilestone = aras.getItemProperty(itemNode, "is_milestone") === "1" ? true : false;
+
+							retVal = !isMilestone ? aras.getItemProperty(itemNode, "expected_duration") : "0";
+							ret.isMilestone = true;
+						}
+						break;
+					case fld["hours"]:
+						if (itemType !== "WBS Element") {
+							var tmpPropNm = (hasAsmnts) ? "rollup_work_est" : "work_est";
+
+							retVal = aras.getItemProperty(itemNode, tmpPropNm) || "";
+						}
+						break;
+					case fld["role"]:
+						if (itemType !== "WBS Element") {
+							roleNode = itemNode.selectSingleNode("lead_role");
+							if (roleNode) {
+								retVal = roleNode.text;
+							}
+						}
+						break;
+					case fld["deliv_type"]:
+						if (itemType === "Activity2") {
+							var deliv_type = itemNode.selectSingleNode("deliv_type");
+
+							if (deliv_type) {
+								retVal = deliv_type.text;
+							}
+						}
+						break;
+					case fld["attach"]:
+						var deliverables = getItemDeliverables(itemNode);
+
+						if (deliverables) {
+							if (deliverables.length === 0) {
+								retVal = ("1" === aras.getItemProperty(itemNode, "deliv_required")) ? "<img src='../images/Deliverable.svg'>" : "";
+							} else {
+								ret.link = itemId;
+								retVal = deliverables.length > 1 ? "Multiple" : aras.getKeyedNameEx(deliverables[0]);
+							}
+						}
+						break;
+					case fld["deliv_required"]:
+						var propNm = "deliv_required";
+					case fld["required"]:
+						if (propNm == undefined) propNm = "is_required";
+						retVal = aras.getItemProperty(itemNode, propNm);
+						if (isValue) {
+							retVal = retVal === '1';
+						}
+						break;
+					default:
+						var cellType = getItemShortType(itemNode);
+						var srcs = ProjectPlan.columns[fldToCol[columnIndex]].sources[cellType];
+
+						if (srcs) {
+							if (srcs.params) {
+								propDt = srcs.params.data_type;
+								propPtrn = srcs.params.pattern;
+
+								if (propDt == "date") {
+									propPtrn = aras.getDotNetDatePattern(propPtrn);
+								}
+							}
+							var xpath = srcs.xpath;
+							var retValNode = itemNode.selectSingleNode(xpath);
+							if (retValNode) {
+								if (propDt && "item" === propDt) {
+									retVal = retValNode.getAttribute("keyed_name");
+									var itemNode = retValNode.selectSingleNode('./Item');
+									ret.link = itemNode ? itemNode.getAttribute('id') : '';
+									break;
+								}
+								if (propDt === "boolean") {
+									retVal = retValNode.text === "1";
+									break;
+								}
+								retVal = retValNode.text;
+							} else if (propDt === "boolean") {
+								retVal = false;
+							}
+						}
+						break;
+				}
+			}
+
+			if (!isValue && propDt) {
+				retVal = aras.convertFromNeutral(retVal, propDt, propPtrn);
+			}
+
+			ret.retVal = retVal;
+			return ret;
+		}
+
+		function getMenuItems(skipSeparators, skipDisabled, getAll) {
+			let resultItems;
+			if (getAll) {
+				resultItems = viewShare.variables.menuActions;
+			} else {
+				resultItems = viewShare.variables.menuActions.reduce(function(result, item) {
+					if (item.type === 'separator') {
+						if (skipSeparators || result.length === 0 || result[result.length - 1].type === 'separator') {
+							return result;
+						}
+
+						result.push(item);
+					} else if (item.type === 'button' &&  !(skipDisabled && isMenuItemDisabled(item.id))) {
+						result.push(item);
+					}
+
+					return result;
+				}, []);
+
+				if (resultItems.length && resultItems[resultItems.length - 1].type === 'separator') {
+					resultItems.pop();
+				}
+			}
+
+			const relationshipTypeActions = ProjectPlan.relationshipTypeActions;
+			if (getAll) {
+				var actionItemsTypes = Object.keys(relationshipTypeActions);
+				actionItemsTypes.forEach(function(type) {
+					var actions = relationshipTypeActions[type];
+					var actionNames = Object.keys(actions);
+					actionNames.forEach(function(actionName) {
+						resultItems.push({ id: actionName, label: actions[actionName] });
+					});
+				});
+			} else {
+				const rowId = viewShare.properties.selectedItemIds[0];
+				const itemType = treeGrid._grid.rows.get(rowId, 'type');
+				const RTActions = relationshipTypeActions[itemType];
+				if (RTActions) {
+					const actions = Object.keys(RTActions);
+					if (actions.length === 0) {
+						return resultItems;
+					}
+
+					resultItems.push({ id: 'separator' });
+					actions.forEach(function (actionName) {
+						resultItems.push({ id: actionName, label: RTActions[actionName] });
+					});
+				}
+			}
+
+			return resultItems;
+		}
+
+		function enableMenuItem(id) {
+			toolbarControl.getItem(id).enable();
+		}
+
+		function disableMenuItem(id) {
+			toolbarControl.getItem(id).disable();
+		}
+
+		function enableMenuItems(menuItems) {
+			menuItems.forEach(enableMenuItem);
+		}
+
+		function isMenuItemDisabled(id) {
+			const item = toolbarControl.getItem(id);
+			if (item) {
+				return !item.getEnabled();
+			}
+		}
+		// --- menu items switches
+
+		function getItemShortType(itemNode) {
+			var itemType = itemNode.getAttribute("type"),
+				resultType;
+
+			if (itemType === "WBS Element") {
+				resultType = wbsRowType;
+			}
+			else if (itemType === "Activity2") {
+				if (aras.getItemProperty(itemNode, "is_milestone") === "1") {
+					resultType = milRowType;
+				}
+				else {
+					resultType = actRowType;
+				}
+			}
+
+			return resultType;
+		}
+
+		function updateWbsIndex(newItem, updateFollowing, updatePreceding) {
+			//!!! try to optimize
+			var newItemParentWbs = getItemParentWbs(newItem),
+				newItemParentSubWbs = newItem.parentNode.parentNode,
+				precedingNodes = newItemParentSubWbs.selectNodes("preceding-sibling::Item[@type='Sub WBS' and not(@action='delete')]/related_id/Item[@type='WBS Element']"),
+				newSortOrder = parseInt(precedingNodes.length) + 1,
+				parentWbsIndex = aras.getItemProperty(newItemParentWbs, "wbs_index"),
+				newWbsIndex, i;
+
+			if (updatePreceding) {
+				for (i = 0; i < precedingNodes.length; i++) {
+					updateWbsIndex(precedingNodes[i], false);
+				}
+			}
+
+			newWbsIndex = (parseInt(parentWbsIndex) === 0) ? newSortOrder : parentWbsIndex + "." + newSortOrder;
+
+			var oldWbsIndex = aras.getItemProperty(newItem, "wbs_index");
+			var isWbsIndexChanged = oldWbsIndex !== newWbsIndex;
+			if (isWbsIndexChanged) {
+				var oldWbsAction = newItem.getAttribute("action");
+				if ((oldWbsAction !== "delete") && (oldWbsAction !== "add")) {
+					newItem.setAttribute("action", "edit");
+				}
+				aras.setItemProperty(newItem, "wbs_index", newWbsIndex);
+			}
+
+			if (updateFollowing) {
+				var followingNodes = newItemParentSubWbs.selectNodes("following-sibling::Item[@type='Sub WBS' and not(@action='delete')]/related_id/Item[@type='WBS Element']");
+
+				for (i = 0; i < followingNodes.length; i++) {
+					updateWbsIndex(followingNodes[i], false);
+				}
+			}
+
+			// update child wbs nodes
+			if (isWbsIndexChanged) {
+				var childWbsNodes = newItem.selectNodes("Relationships/Item[@type='Sub WBS' and not(@action='delete')]/related_id/Item[@type='WBS Element']");
+				for (i = 0; i < childWbsNodes.length; i++) {
+					updateWbsIndex(childWbsNodes[i]);
+				}
+			}
+		}
+
+		function initDelivITList() {
+			var statusId = aras.showStatusMessage(0, aras.getResource("project", "project_tree.loading_deliverable_related_itemtypes")),
+				queryItem = new mainWnd.Item(),
+				queryAml = '<Item type="Morphae" action="get" select="related_id">' +
+								'<source_id>' + aras.getItemTypeId("Deliverable") + '</source_id>' +
+							'</Item>',
+				queryResult;
+
+			queryItem.loadAML(queryAml);
+			queryResult = queryItem.apply();
+			aras.clearStatusMessage(statusId);
+
+			if (queryResult.isError()) {
+				aras.AlertError(aras.getResource("project", "project_tree.can_not_get_deliverable"));
+				return;
+			}
+			else {
+				var itemNode, itemId, itemName, itemLabel,
+					i;
+
+				deliverableItemTypeList = [];
+				for (i = 0; i < queryResult.getItemCount(); i++) {
+					itemNode = queryResult.getItemByIndex(i).node.selectSingleNode("related_id/Item");
+					itemId = itemNode.getAttribute("id");
+					itemName = aras.getItemProperty(itemNode, "name");
+					itemLabel = aras.getItemProperty(itemNode, "label");
+
+					deliverableItemTypeList.push({id: itemId, name: itemName, label: itemLabel});
+				}
+			}
+		}
+
+		function loadActivities(chain) {
+			var nodesToLoad = [],
+				nodeToLoad,
+				itemId, i, j;
+
+			function getDeeperById(nodeId) {
+				for (var k = 0; k < nodesToLoad.length; k++) {
+					if (nodesToLoad[k][0] == nodeId) {
+						return nodesToLoad[k];
+					}
+				}
+				return null;
+			}
+
+			for (i = 0; i < chain.length; i++) {
+				itemId = chain[i];
+
+				if (!getItemNodeById(itemId, false, 'Activity2')) {
+					var actN = actNums.selectSingleNode("//a[@id='" + itemId + "']");
+
+					if (actN) {
+						var ancestors = actN.selectNodes("ancestor::w"),
+							ancestor, ancestorId, ancestorNode;
+
+						for (j = 0; j < ancestors.length; j++) {
+							ancestor = ancestors[j];
+							ancestorId = ancestor.getAttribute("id");
+							ancestorNode = getItemNodeById(ancestorId, false, 'WBS Element');
+
+							if (ancestorNode) {
+								break;
+							}
+						}
+						if (ancestorNode) {
+							var oldElement = getDeeperById(ancestorId);
+
+							if (oldElement && oldElement[2] > j) {
+								oldElement[1] = ancestorNode;
+								oldElement[2] = j;
+							}
+							else {
+								var arrToPush = [];
+
+								arrToPush[0] = ancestorId;
+								arrToPush[1] = ancestorNode;
+								arrToPush[2] = j;
+								nodesToLoad.push(arrToPush);
+							}
+						}
+						else { /*??? inadmissible?*/ }
+					}
+					else { /*??? inadmissible?*/ }
+				}
+			}
+
+			for (i = 0; i < nodesToLoad.length; i++) {
+				nodeToLoad = nodesToLoad[i];
+				loadBranch(nodeToLoad[1], nodeToLoad[2]);
+			}
+		}
+
+		function deleteSelectedItem(itemIds) {
+			if (!itemIds.length) {
+				return;
+			}
+
+			var confirmMessages = {
+				deleteAll: aras.getResource("project", "project_tree.confirm_delete_all_items"),
+				deleteActivity: aras.getResource("project", "project_tree.activity_will_be_deleted"),
+				deleteWbs: aras.getResource("project", "project_tree.wbs_and_children_will_be_ deleted"),
+				hasSuccessors: aras.getResource("project", "project_tree.activity_for_deletion_has_successor")
+				},
+				confirmEachDeletion = (itemIds.length > 1) ? !aras.confirm(confirmMessages.deleteAll) : true,
+				deletedItemIds = [],
+				successors = [],
+				selectedItem, selectedType, parentItem, requiredItem,
+				condition, deleteCandidates, currentPredecessor,
+				activityNode, activityId, allReferrers, referrer, itemId,
+				i, j, k;
+
+
+			for (k = 0; k < itemIds.length; k++) {
+				itemId = itemIds[k];
+				selectedItem = getItemNodeById(itemId, undefined, undefined, true);
+				
+				if (!selectedItem) {
+					continue;
+				}
+
+				selectedType = selectedItem.getAttribute("type");
+
+				if (!confirmEachDeletion || aras.confirm((selectedType === "WBS Element") ? confirmMessages.deleteWbs : confirmMessages.deleteActivity)) {
+					if (selectedType === "WBS Element") {
+						getBranch(selectedItem);
+						selectedItem = getItemNodeById(itemId, undefined, undefined, true);
+					}
+
+					// check that item or it's childs are not required
+					parentItem = selectedItem.parentNode.parentNode;
+					requiredItem = selectedItem.selectSingleNode("descendant-or-self::Item[@type='Activity2'][not(@action='delete')][is_required='1']");
+
+					if (requiredItem) {
+						var id = requiredItem.getAttribute("id"),
+							isMilestone = aras.getItemProperty(requiredItem, "is_milestone"),
+							activityType = (isMilestone === "1") ? "milestone" : "activity";
+
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_delete_required", activityType, getActNum(id)));
+						return;
+					}
+
+					condition = "[";
+					deleteCandidates = parentItem.selectNodes("descendant-or-self::Item[@type='WBS Activity2']/related_id/Item[@type='Activity2'][not(@action='delete')]");
+					successors.length = 0;
+
+					for (i = 0; i < deleteCandidates.length; i++) {
+						activityNode = deleteCandidates[i];
+						activityId = activityNode.getAttribute("id");
+
+						condition += (i > 0) ? " or " : "";
+						condition += "related_id='" + activityId + "'";
+
+						allReferrers = getReferrers(activityId); // changed getChain to getReferrers, because of IR-005491
+
+						if (allReferrers) {
+							for (j = 0; j < allReferrers.length; j++) {
+								referrer = allReferrers[j];
+
+								if (seekInArray(successors, referrer) === -1) {
+									successors.push(referrer);
+								}
+							}
+						}
+					}
+					condition += "]";
+
+					if (successors.length) {
+						if (aras.confirm(confirmMessages.hasSuccessors)) {
+							loadActivities(successors);
+							deletePredecessors(successors, condition);
+						}
+						else {
+							return;
+						}
+					}
+
+					currentPredecessor = selectedItem.selectSingleNode("Relationships/Item[@type='Predecessor']");
+					if (currentPredecessor) {
+						deleteItemNode(currentPredecessor);
+					}
+
+					// need to load deleting branch by getBranch(selectedItem);
+					// after getBranch() parent node can be null
+					relinkPrevItemOnDelete(selectedItem, parentItem);
+					deleteDescendant(parentItem);
+					deletedItemIds.push(itemId);
+				}
+			}
+
+			if (deletedItemIds.length) {
+				setDirty();
+				return true;
+			}
+		}
+
+		function deletePredecessors(chain, cond) {
+			var itemId, itemNode,
+				itemRelationships, predecessors,
+				i, j;
+
+			for (i = 0; i < chain.length; i++) {
+				itemId = chain[i];
+				itemNode = viewShare.properties.wbs.selectSingleNode("descendant::Item[@type='WBS Activity2']/related_id/Item[@type='Activity2'][@id='" + itemId + "']");
+
+				if (itemNode) {
+					itemRelationships = itemNode.selectSingleNode("Relationships"),
+					predecessors = itemRelationships.selectNodes("Item[@type='Predecessor'][not(@action='delete')]" + cond);
+
+					if (!predecessors.length) {
+						predecessors = itemRelationships.selectNodes("Item[@type='Predecessor'][not(@action='delete')][related_id/Item" + cond.replace("related_", "") + "]");
+					}
+
+					for (j = 0; j < predecessors.length; j++) {
+						deleteItemNode(predecessors[j]);
+					}
+
+					if (!itemRelationships.hasChildNodes()) {
+						itemRelationships.parentNode.removeChild(itemRelationships);
+					}
+				}
+				else {
+					aras.AlertError(aras.getResource("project", "project_tree.can_not_find_item_it_should_be_in_tree", itemId));
+					return;
+				}
+			}
+		}
+
+		function deleteLinkRelationship(itemNode) {
+			var itemId = itemNode.getAttribute("id"),
+				itemAction = itemNode.getAttribute("action"),
+				resultItem = itemNode.selectSingleNode("related_id/Item");
+
+			resultItem = resultItem.parentNode.removeChild(resultItem);
+
+			if (itemAction === "add") {
+				itemNode.parentNode.removeChild(itemNode);
+			}
+			else {
+				var removedFrom = resultItem.getAttribute("removed_from");
+
+				if (!removedFrom) {
+					resultItem.setAttribute("removed_from", itemId);
+				}
+
+				itemNode.setAttribute("action", "delete");
+			}
+
+			return resultItem;
+		}
+
+		function addLinkRelationship(sourceItem, relTypeName, relatedItem, where, whereNode) {
+			var newRelationship = ptNewRelationship(relTypeName, sourceItem, relatedItem);
+
+			switch (where) {
+				case "first":
+					newRelationship = newRelationship.parentNode.insertBefore(newRelationship, newRelationship.parentNode.firstChild);
+					break;
+				case "above":
+					if (!whereNode) {
+						aras.AlertError(aras.getResource("project", "project_tree.wrong_call_of_addlinkrelationship"));
+						return;
+					}
+
+					var whereRel = whereNode.parentNode.parentNode;
+					newRelationship = newRelationship.parentNode.insertBefore(newRelationship, whereRel);
+					break;
+				case "below":
+					if (!whereNode) {
+						aras.AlertError(aras.getResource("project", "project_tree.wrong_call_of_addlinkrelationship"));
+						return;
+					}
+
+					var whereRel = whereNode.parentNode.parentNode;
+					if (whereRel.nextSibling) {
+						newRelationship = newRelationship.parentNode.insertBefore(newRelationship, whereRel.nextSibling);
+					}
+					else {
+						newRelationship = newRelationship.parentNode.appendChild(newRelationship);
+					}
+					break;
+			}
+
+			return newRelationship;
+		}
+
+		function putBack(node, type, removedFrom) {
+			var parent = viewShare.properties.wbs.selectSingleNode("descendant::Item[@id='" + removedFrom + "']");
+
+			if (!parent) {
+				aras.AlertError(aras.getResource("project", "project_tree.can_not_find_item_with_id_removedFrom", removedFrom));
+				return;
+			}
+
+			var relatedId = parent.selectSingleNode("related_id");
+			if (!relatedId) {
+				relatedId = parent.appendChild(parent.ownerDocument.createElement("related_id"));
+			}
+
+			node = relatedId.appendChild(node);
+			node.removeAttribute("removed_from");
+			deleteDescendant(node);
+		}
+
+		function deleteDescendant(delNode) {
+			var delType = delNode.getAttribute("type");
+
+			if (delType === "WBS Element" || delType === "Activity2") {
+				var removedFrom = delNode.getAttribute("removed_from");
+
+				if (removedFrom) {
+					putBack(delNode.parentNode.removeChild(delNode), delType, removedFrom);
+					return;
+				}
+				else {
+					if (delType === "WBS Element") {
+						var nodesToDelete = delNode.selectNodes("Relationships/Item[@type='Sub WBS' or @type='WBS Activity2']");
+
+						for (var i = 0; i < nodesToDelete.length; i++) {
+							deleteDescendant(nodesToDelete[i]);
+						}
+					}
+				}
+			}
+			else if (delType === "Sub WBS" || delType === "WBS Activity2") {
+				var nodeToDelete = delNode.selectSingleNode("related_id/Item");
+
+				if (nodeToDelete) {
+					deleteDescendant(nodeToDelete);
+				}
+			}
+
+			deleteItemNode(delNode);
+		}
+
+		function deleteItemNode(itemNode) {
+			const itemAction = itemNode.getAttribute('action');
+			if (itemAction === 'add') {
+				itemNode.parentNode.removeChild(itemNode);
+			} else {
+				itemNode.setAttribute('action', 'delete');
+			}
+		}
+
+		function getSibling(node, findFollowing, nodeIsActivity2OrWbsElement) {
+			var xpath = "-sibling::Item[@type='WBS Activity2' or @type='Sub WBS'][not(@action='delete')][1]";
+
+			xpath = (findFollowing ? "following" : "preceding") + xpath;
+			if (nodeIsActivity2OrWbsElement) {
+				xpath = "parent::related_id/parent::Item/" + xpath;
+			}
+
+			return node.selectSingleNode(xpath);
+		}
+
+		function relinkPrevItemOnDelete(delNode, delNodeParent) {
+			var delRel = null;
+
+			if (delNode.parentNode && delNode.parentNode.parentNode) {
+				delRel = delNode.parentNode.parentNode;
+			}
+			else {
+				if (delNodeParent) {
+					delRel = delNodeParent;
+				}
+				else {
+					return;
+				}
+			}
+
+			var delRelType = delRel.getAttribute("type");
+			if (delRelType === "Sub WBS" || delRelType === "WBS Activity2") {
+				var belowRel = getSibling(delRel, true, false);
+
+				if (belowRel) {
+					var belowWbs = belowRel.selectSingleNode("related_id/Item"),
+						belowId = belowWbs.getAttribute("id"),
+						belowType = belowWbs.getAttribute("type"),
+						aboveRel = getSibling(delRel, false, false),
+						aboveWbs,
+						aboveId = "";
+
+					if (aboveRel) {
+						aboveWbs = aboveRel.selectSingleNode("related_id/Item");
+						aboveId = aboveWbs.getAttribute("id");
+					}
+
+					belowWbs = getItemForEdit(belowWbs);
+					if (!belowWbs) {
+						aras.AlertError(aras.getResource("project", "project_tree.can_not_get_item_of_type_for_edit", belowType, belowId));
+						return;
+					}
+
+					aras.setItemProperty(belowWbs, "prev_item", aboveId);
+				}
+			}
+		}
+
+		function relinkPrevItemOnAdd(addNode) {
+			var addRel = null,
+				addRelType;
+
+			if (addNode.parentNode && addNode.parentNode.parentNode) {
+				addRel = addNode.parentNode.parentNode;
+				addRelType = addRel.getAttribute("type");
+			}
+			else {
+				aras.AlertError(aras.getResource("project", "project_tree.item_has_not_parent_relationship"));
+				return;
+			}
+
+			addNode = getItemForEdit(addNode);
+			if (!addNode) {
+				aras.AlertError(aras.getResource("project", "project_tree.can_not_get_item_for_edit"));
+				return;
+			}
+
+			if (addRelType !== "Sub WBS" && addRelType !== "WBS Activity2") {
+				aras.AlertError(aras.getResource("project", "project_tree.wrong_type_of_relationship", addRelType));
+				return;
+			}
+
+			var addItemId = addNode.getAttribute("id"),
+				aboveRel = getSibling(addRel, false, false),
+				belowRel = getSibling(addRel, true, false),
+				aboveId = "";
+
+			if (aboveRel) {
+				var aboveWbs = aboveRel.selectSingleNode("related_id/Item");
+				aboveId = aboveWbs.getAttribute("id");
+			}
+			aras.setItemProperty(addNode, "prev_item", aboveId);
+
+			if (belowRel) {
+				var belowWbs = belowRel.selectSingleNode("related_id/Item"),
+					belowId = belowWbs.getAttribute("id"),
+					belowType = belowWbs.getAttribute("type");
+
+				belowWbs = getItemForEdit(belowWbs);
+				if (!belowWbs) {
+					aras.AlertError(aras.getResource("project", "project_tree.can_not_get_item_of_type_for_edit", belowType, belowId));
+					return;
+				}
+
+				aras.setItemProperty(belowWbs, "prev_item", addItemId);
+			}
+		}
+
+		function getDelivType(itemNode) {
+			var itemType = itemNode.getAttribute("type");
+
+			switch (itemType) {
+				case "WBS Element":
+					return "WBS Deliverable";
+				case "Activity2":
+					return "Activity2 Deliverable";
+				default:
+					aras.AlertError(aras.getResource("project", "project_tree.no_such_type_supported_for_deliverables", itemType));
+			}
+		}
+
+		function getItemDeliverables(/*xmlNode*/ itemNode, /*string*/ deliverableId) {
+			var foundDeliverables;
+
+			if (itemNode) {
+				var idCondition = deliverableId ? "[@id='" + deliverableId + "']" : "",
+					deliverableType = getDelivType(itemNode);
+
+				if (idCondition) {
+					foundDeliverables = itemNode.selectSingleNode("Relationships/Item[@type='" + deliverableType + "'][not(@action='delete')]/related_id/Item" + idCondition);
+				}
+				else {
+					foundDeliverables = itemNode.selectNodes("Relationships/Item[@type='" + deliverableType + "'][not(@action='delete')]/related_id/Item");
+				}
+			}
+
+			return foundDeliverables;
+		}
+
+		function getItemForEdit(itemNode, needLock) {
+			var action = itemNode.getAttribute("action");
+			var id = itemNode.getAttribute("id");
+
+			if (action === "delete") {
+				return false;
+			}
+
+			if (action === "add" || action === "update" || action === "edit" && !needLock) {
+				return itemNode;
+			}
+
+			// IR-005805
+			// now 'item for edit' doesn't lock item for better performance, it just sets 'edit' action
+			if ((id === wbsId || needLock) && aras.isLocked(itemNode) == false) {
+				var parentOfItemNode = itemNode.parentNode;
+				var tmpItemNode = aras.lockItemEx(itemNode);
+
+				if (!tmpItemNode) {
+					return false;
+				}
+
+				var tmpNd = itemNode.selectSingleNode("locked_by_id");
+				if (!tmpNd) {
+					tmpNd = itemNode.appendChild(itemNode.ownerDocument.createElement("locked_by_id"));
+				}
+				tmpNd.text = aras.getItemProperty(tmpItemNode, "locked_by_id");
+
+				var nd2delete = parentOfItemNode.selectSingleNode("Item");
+				//because lockItemEx replaces itemNode in cache, i.e in ProjectItem
+				if (nd2delete) {
+					parentOfItemNode.replaceChild(itemNode, nd2delete);
+				}
+
+				itemNode.setAttribute("action", "update");
+			}
+
+			if (!itemNode.getAttribute("action")) {
+				itemNode.setAttribute("action", "edit");
+			}
+			return itemNode;
+		}
+
+		function getFilterCondition(condition, headId) {
+			return headId === 'predecessor' ? new filterPredecessorCondition(condition) : new filterDefaultCondition(condition);
+		}
+
+		function filterDefaultCondition(condition) {
+			this.error = (typeof condition === "string") ? false : true;
+			this.test = function (testValue) {
+				if (!this.error) {
+					return this.regex.test(testValue);
+				}
+				return true; // filter is not working
+			};
+
+			if (!this.error) {
+				var reSpecChars = /(\$|\(|\)|\+|\.|\[|\?|\^|\{|\||\\)/g, // except *, because * and % used in mask
+					reMask = /(\*|%)/g;
+
+				condition = condition.replace(reSpecChars, "\\$1");
+				condition = condition.replace(reMask, ".*");
+				condition = "^" + condition + "$";
+
+				this.regex = new RegExp();
+				this.regex.compile(condition, "i");
+			}
+		}
+
+		function filterPredecessorCondition(condition) {
+			this.error = (typeof condition === "string") ? false : true;
+			this.test = function (testValue) {
+				if (!this.error) {
+					if (this.rePreds) {
+						var regExpPred, i;
+
+						for (i = 0; i < this.rePreds.length; i++) {
+							regExpPred = this.rePreds[i];
+
+							if (!regExpPred.test(testValue)) {
+								return false;
+							}
+						}
+					}
+					else {
+						return false;
+					}
+				}
+
+				return true;
+			};
+
+			if (!this.error) {
+				var re = /\d+/g,
+					preds = condition.match(re),
+					pred, reStr, newRegExp, i;
+
+				if (preds == null) {
+					this.rePreds = null;
+					return;
+				}
+
+				this.rePreds = [];
+
+				for (i = 0; i < preds.length; i++) {
+					pred = preds[i];
+					reStr = "(^" + pred + "\\D+)|(\\D+" + pred + "$)|(\\D+" + pred + "\\D+)|(^" + pred + "$)";
+
+					newRegExp = new RegExp(reStr);
+					this.rePreds.push(newRegExp);
+				}
+			}
+		}
+
+		function viewEditSelectedItem(itemId) {
+			var selectedItem = getItemNodeById(itemId),
+				itemType = selectedItem.getAttribute("type"),
+				itemAction = selectedItem.getAttribute("action"),
+				i;
+
+			if (viewShare.properties.isEditMode) {
+				selectedItem = getItemForEdit(selectedItem, true);
+
+				if (!itemAction && selectedItem) {
+					selectedItem.removeAttribute("action"); //remove redundant action (user may not edit item in popup)
+				}
+			}
+
+			if (!selectedItem) {
+				return;
+			}
+
+			if (itemAction !== "add") {
+				var queryItem = new mainWnd.Item(),
+					queryResult, itemFromServer;
+
+				queryItem.loadAML("<Item type='" + itemType + "' action='get' id='" + itemId + "' />");
+				queryResult = queryItem.apply();
+				itemFromServer = !queryResult.isError() ? queryResult.getItemByIndex(0).node : null;
+
+				if (!itemFromServer) {
+					aras.AlertError(aras.getResource("project", "project_tree.can_not_find_seltype", itemType, itemId));
+					return;
+				}
+				else {
+					// append missed item properties
+					var propertyNodes = selectedItem.selectNodes("*[name()!='Relationships']"),
+						filterCondition = "";
+
+					for (i = 0; i < propertyNodes.length; i++) {
+						if (i > 0) {
+							filterCondition += " and ";
+						}
+
+						filterCondition += "name()!='" + propertyNodes[i].tagName + "'";
+					}
+
+					propertyNodes = itemFromServer.selectNodes("*[" + filterCondition + "]");
+					for (i = 0; i < propertyNodes.length; i++) {
+						selectedItem.appendChild(propertyNodes[i].cloneNode(true));
+					}
+				}
+			}
+
+			var preferedWidth, preferedHeight;
+			var selItemTypeNode = aras.getItemTypeForClient(itemType, "name").node;
+
+			if (selItemTypeNode) {
+				var formNode = selItemTypeNode.selectSingleNode("Relationships/Item[@type='View']/related_id/Item[@type='Form' and name='" + itemType + "']"),
+					formForDisplay = aras.getFormForDisplay(formNode.getAttribute("id"));
+
+				if (formForDisplay && formForDisplay.node) {
+					preferedWidth = parseInt(aras.getItemProperty(formForDisplay.node, "width"));
+					preferedHeight = parseInt(aras.getItemProperty(formForDisplay.node, "height")) + 6 /*splitter*/ + 230 /*relationships*/ + 23 /*status bar*/ + 20 /* safe interval */;
+				}
+			}
+			preferedWidth = !isNaN(preferedWidth) ? preferedWidth : 820;
+			preferedHeight = !isNaN(preferedHeight) ? preferedHeight : 650;
+
+			var itemTypeNode = aras.getItemTypeDictionary(itemType).node;
+			var dialogParams = {
+				aras: aras,
+				item: selectedItem,
+				Item: mainWnd.Item,
+				isEditMode: viewShare.properties.isEditMode,
+				itemID: itemId,
+				itemTypeName: itemType,
+				keyed_name: aras.getKeyedNameEx(selectedItem),
+				noTabs: false,
+				opener: window,
+				itemType: itemTypeNode,
+				itemTypeLabel: aras.getItemProperty(itemTypeNode, "label"),
+				scriptsURL: aras.getScriptsURL(),
+				dbName: aras.getDatabase(),
+
+				dialogWidth: preferedWidth,
+				dialogHeight: preferedHeight,
+				resizable: true,
+				content: "../Solutions/Project/scripts/modalViewEdit.html"
+			};
+
+			if (itemType === "Activity2" && aras.getItemProperty(selectedItem, "is_milestone") === "1") {
+				dialogParams.tabsToDisable = ["Time Record"];
+			}
+			else {
+				dialogParams.tabsToDisable = [];
+			}
+			// IR-040260 "Predecessor suffix removed on edit Activity2"
+			var oldValues = {};
+			var itemNode = getItemNodeById(itemId);
+			for (fieldName in viewShare.properties.fld) {
+				columnIndex = viewShare.properties.fld[fieldName];
+				oldValues[fieldName] = getCellLabel(itemNode, columnIndex).retVal;
+			}
+			// End IR-040260 fix
+
+			var dialog;
+			if(itemType === 'Activity2' || itemType === 'WBS Element') {
+				dialog = window.parent.ArasModules.MaximazableDialog.show("iframe", dialogParams);
+			} else {
+				dialog = window.parent.ArasModules.Dialog.show("iframe", dialogParams);
+			}
+			window.parent.dialogArguments = dialogParams;
+			dialog.promise.then(function () {
+				if (viewShare.properties.isEditMode) {
+					var selItemAction = selectedItem.getAttribute("action");
+
+					if (selItemAction === "update") {
+						selectedItem.setAttribute("action", "edit");
+					}
+					else if (selItemAction === "add" || selItemAction === "edit") { /*do nothing*/
+					}
+					else {
+						return;
+					}
+				}
+				else {
+					return;
+				}
+
+				var allDelWBS = selectedItem.selectNodes("Relationships/Item[@type='WBS Activity2'][@action='delete']/related_id/Item[@type='Activity2'][Relationships/Item[@type='Predecessor']]");
+
+				if (allDelWBS.length > 0) {
+					var nodeId, itemNode, successors, condition, referrers,
+							predecessor, currentReferrer, i, j;
+
+					for (i = 0; i < allDelWBS.length; i++) {
+						nodeId = allDelWBS[i].getAttribute("id");
+						itemNode = getItemNodeById(nodeId);
+						successors = [];
+						condition = "[related_id='" + nodeId + "']";
+						referrers = getReferrers(nodeId); // changed getChain to getReferrers, because of IR-005491
+
+						for (j = 0; j < referrers.length; j++) {
+							currentReferrer = referrers[j];
+
+							if (seekInArray(successors, currentReferrer) === -1) {
+								successors.push(currentReferrer);
+							}
+						}
+
+						if (successors.length !== 0) {
+							loadActivities(successors);
+							deletePredecessors(successors, condition);
+						}
+
+						// need to load deleting branch by getBranch(selItem);
+						relinkPrevItemOnDelete(itemNode);
+						deleteDescendant(itemNode.parentNode.parentNode);
+
+						predecessor = itemNode.selectSingleNode("Relationships/Item[@type='Predecessor']");
+						if (predecessor) {
+							deleteItemNode(predecessor);
+						}
+					}
+
+					projectView.raiseEvent("onProjectItemChanged", undefined, itemId, "updated");
+				}
+				else {
+					// IR-040260 "Predecessor suffix removed on edit Activity2"
+					projectView.raiseEvent("onItemChanged", undefined, itemId, oldValues);
+					// End IR-040260 fix
+				}
+			});
+		}
+
+		function Synchronizer(rowId, item, win) {
+			this.rowId = rowId;
+			this.item = item;
+			this.onUnload = this.updateData.bind(this);
+			win.addEventListener('unload', this.onUnload);
+		}
+
+		Synchronizer.prototype.updateData = function(e) {
+			e.currentTarget.removeEventListener('unload', this.onUnload);
+			const itemAction = this.item.getAttribute('action');
+			if (itemAction !== 'skip' && !aras.checkItem(this.item)) {
+				const self = this;
+				return aras.uiShowItemEx(this.item, 'tab view').then(function(win) {
+					win.addEventListener('unload', self.onUnload);
+				});
+			}
+
+			projectView.raiseEvent('onItemChanged', undefined, this.rowId);
+		};
+		// --- onmenu functions
+
+		function executeScheduling() {
+			var projItemTypeNd = aras.getItemTypeForClient("Project", "name");
+			if (!projItemTypeNd) {
+				aras.AlertError(aras.getResource("project", "project_tree.project_item_type_not_found"));
+				return;
+			}
+
+			var actionName = "Schedule Project";
+			var actionItem = aras.getItem("Action", "name='" + actionName + "'", "<name>" + actionName + "</name>");
+			if (!actionItem) {
+				aras.AlertError(aras.getResource("project", "project_tree.action_with_name_con_not_be_found", actionName));
+				return;
+			}
+			aras.invokeAction(actionItem, projItemTypeNd.getAttribute('id'), ProjectPlan.projectId);
+		}
+
+		function openCompletionDialog(itemId) {
+			if (isDirty()) {
+				aras.AlertError(aras.getResource("project", "project_tree.save_changes_in_project"));
+				return;
+			}
+
+			var acwFormName = "Activity Completion Worksheet",
+				acwFormNode = aras.getItem("Form", "name='" + acwFormName + "'", "<name>" + acwFormName + "</name>", 0),
+				params = [],
+				options = {
+					dialogWidth: "700",
+					dialogHeight: "500",
+					resizable: true
+				};
+
+			if (acwFormNode) {
+				var formWidth = parseInt(aras.getItemProperty(acwFormNode, "width"));
+				var formHeight = parseInt(aras.getItemProperty(acwFormNode, "height"));
+
+				params.dialogWidth = isNaN(formWidth) ? options.dialogWidth : formWidth;
+				params.dialogHeight = isNaN(formHeight) ? options.dialogHeight : formHeight + +20/*statusbar*/ + 31 /*toolbar*/ + 28 /*title bar*/ + 25 /*safe-interval between form and relationships*/;
+			}
+
+			params[0] = window;
+			params[1] = itemId;
+			params.aras = aras;
+			params.isPopup = true;
+
+			window.focus();
+			params.content = "../Solutions/Project/scripts/ActivityCompletionWorksheet/ACWDialog.html";
+			var dialog = window.parent.ArasModules.Dialog.show("iframe", params);
+			dialog.promise.then(function (doReload) {
+				if (doReload) {
+					if (doReload.isProjectUpdated) {
+						//do nothing. ACW handles this case.
+					}
+					else if (doReload.isActivityUpdated) {
+						var qryDom = uniCache.queryDom;
+						if (!qryDom) {
+							aras.AlertError(aras.getResource("project", "project_tree.query_dom_invalid"));
+							return;
+						}
+
+						var itemNode = ProjectPlan.projectItem.selectSingleNode(".//Item[@id='" + itemId + "']");
+						if (itemNode) {
+							var itemType = itemNode.getAttribute("type"),
+									queryNode = qryDom.selectSingleNode("//Item[@type='" + itemType + "']");
+
+							if (queryNode) {
+								var clonedNode = queryNode.cloneNode(true),
+										applyResult, newItem;
+
+								clonedNode.setAttribute("id", itemId);
+								clonedNode.setAttribute("action", "get");
+								applyResult = aras.soapSend("ApplyItem", clonedNode.xml);
+
+								newItem = applyResult.results.selectSingleNode(aras.XPathResult("/Item"));
+								if (newItem) {
+									var parentNode = itemNode.parentNode;
+
+									parentNode.insertBefore(newItem, itemNode);
+									parentNode.removeChild(itemNode);
+
+									projectView.raiseEvent("onProjectItemChanged", undefined, itemId, "updated");
+								}
+							}
+							else {
+								aras.AlertError(aras.getResource("project", "project_tree.query_node_can_not_be_found", itemType));
+								return;
+							}
+
+						}
+					}
+				}
+			});
+		}
+
+		function onSelectItemChanged() {
+			updateMenuActionsState();
+			viewShare.controller.raiseEvent('onSelectItemChanged', undefined, treeGrid.getSelectedItemIDs());
+		}
+
+		onbeforeunload = function () {
+			if (GanttWnd !== null && !aras.isWindowClosed(GanttWnd)) {
+				GanttWnd.close();
+			}
+		};
+
+		function showGantt() {
+			const resXslt = generateXSLT(ProjectPlan.projectItemType, ProjectPlan.columns, true);
+			uniCache.xsltWbs = resXslt.xsltWbs;
+			uniCache.xsltWbsBranch = resXslt.xsltWbsBranch;
+
+			var wbs = viewShare.internal.wbs;
+			loadFullProjectTree();
+			sortItems(wbs);
+			showGanttInternal(wbs, ProjectPlan.projectNumber);
+		}
+
+
+		//START EXPORT TO EXCEL CHANGES
+		function exportToExcel(){
+
+			//Get the column headers 
+			const getProjGridHead = function(grid){
+				let headArr = [];
+				const cells = grid._head._store;
+				cells.forEach(function(cell,index){
+					headArr.push(cell.label);
+				});
+				return headArr;
+			};
+
+			//row
+			const getProjGridRowTree = function(incObj, grid){
+				//Grabbing from the _rows._store. This has our heirarchy information, which we'll use to build the tree.
+				
+				const rows = grid._rows._store;
+				//for each row
+				rows.forEach(function(row,index){
+					//make an obj for the row
+					//This is primarily important for the uniqueId and the children. We'll later use this to keep track of where something is in the tree.
+					//label is entirely for human readability in the code.
+					let midObj = {label: row.treeNode,id:row.uniqueId,children:row.children, level:0};
+
+					//if there's children, find out 
+					if (row.children && row.children != false){
+						midObj.children = [];
+						row.children.forEach(function(child,index){
+							//store the ID of the child. NOTE: We aren't storing the actual child, it's not here, we just store the uniqueID
+							midObj.children.push(child);
+						});
+					}
+					//update the object we plan to return
+					incObj.children.push(midObj)
+				});
+				return incObj;
+			}
+
+			const getProjGridRowData = function(incObj){
+				//Note: This loops through all rows, whereas the getProjGridRowTree just does one per call.
+				//Also, this doesn't have children ids.
+				var visRowIds = treeGrid.getVisibleRowsIds_Experimental();
+				for (var i = 0; i < visRowIds.length; i++)
+				{
+					var rowId = visRowIds[i];
+					// This holds the <tr/> element of the row
+					var row = treeGrid.getRowByItemId_Experimental(rowId);
+					var cellBreakdown = [];
+					//for each column in the cell, get the text
+					for (var x = 0; x <row.cells.length; x++){
+						cellBreakdown.push(row.cells[x].textContent);
+					}
+					//now, make an equivalent of the old midObj- an object containing all the detail for the row.
+					//Note that we don't have an equivalent of Children here. We'll connect this to the heirarchy later, in matchSources
+					let midObj = {label: cellBreakdown[1],id:rowId, level:0,
+						n:cellBreakdown[0], predecessor:cellBreakdown[2], status:cellBreakdown[3], leader: cellBreakdown[4], leadRole:cellBreakdown[5],  
+						planStart: cellBreakdown[6], planFinish: cellBreakdown[7], duration:cellBreakdown[8], hours:cellBreakdown[9], attach:cellBreakdown[10]};
+					incObj.push(midObj);
+				}
+				return incObj;
+			}
+
+			//for each child that's an id
+			const descend = function(descendant, index, array){
+				//if it's an id
+				if (typeof descendant=="string"){
+					//do a pass over the obj, looking for the match. It should definitely be here somewhere.
+					topObj.children.some(function(child){
+						//Found it: 
+						if(child.id==descendant){
+							//does that one have children? 
+							if(child.children){
+								//if yes, add this one to its newObj parent in place of the ID
+								array[index]=child; 
+								//then call Descend for each child that's an id
+								child.children.forEach(descend);
+								
+							}else{
+								//If no, add this one to its newObj parent in place of the ID, 
+								array[index]=child;
+							}
+							//If this gets slow, slice the descendant out of the oldlist.
+						}
+					});
+				//if it's an object with no children
+				}else if(!descendant.children){
+				}
+			}
+
+			// Find another with children. 
+			const apogee = function(topChild, index, array){
+				if(topChild.children){
+					//is it the parent of newObj? 
+					topChild.children.forEach(function(lowChild){
+						if(lowChild==newObj.id){
+						//if yes, make copy newObj to swapObj. set newObj = this parent. replace the ID of newObj.children[match] with SwapObj.
+						//if yes, replace the ID of parent.children[match] with newObj. set newObj = this parent.
+							topChild.children[topChild.children.indexOf(lowChild)] = newObj;
+							newObj = topChild;
+						}else{
+							//for each child that's still just an id, descend 
+							topChild.children.forEach(descend);
+						}
+					})
+				}
+			}
+
+
+			let tableizer = function(headers,data){
+
+				res = "<table>";
+				//header
+				res += "<thead>";
+				headers.forEach(function(header){
+					res += "<th>";
+					res += header;
+					res += "</th>";
+				});
+				res += "</thead>";
+
+				//columns
+				res += "<columns>"; res += "<column width='40' order='0' />";
+				res += "<column width='180' order='1' />";
+				res += "<column width='20' order='2' align='c' />";
+				res += "<column width='70' order='3' />";	
+				res += "<column width='60' order='4' />";	
+				res += "<column width='100' order='5' />";
+				res += "<column width='100' order='6' />";
+				res += "<column width='100' order='7' />";	
+				res += "<column width='40' order='8' />";
+				res += "<column width='30' order='9' />";	
+				res += "<column width='70' order='10' />";	
+				res += "<column width='90' order='11' />";
+				res += "<column width='40' order='12' />";	
+				res += "<column width='100' order='13' />";	
+				res += "</columns>";
+
+				//rows
+				//We don't foreach because that will not work well on children
+				//instead this gets called from addChildRow for each descendant
+				const makeRow = function(rowObj){
+					subRes = "<tr>";
+					subRes += "<td>"+rowObj.level+"</td>";	
+					//label gets indented for being deeper in heirachy, represented by having a higher level
+					subRes += "<td>";
+					for(i=0; i<rowObj.level-1;i++){subRes+="    ";}
+					subRes += rowObj.label+"</td>";	
+					subRes += "<td>"+rowObj.n+"</td>";
+					subRes += "<td>"+rowObj.predecessor+"</td>";
+					subRes += "<td>"+rowObj.status+"</td>";
+					subRes += "<td>"+rowObj.leader+"</td>";
+					subRes += "<td>"+rowObj.planStart+"</td>";
+					subRes += "<td>"+rowObj.planFinish+"</td>";
+					subRes += "<td>"+rowObj.duration+"</td>";
+					subRes += "<td>"+rowObj.hours+"</td>";	
+					subRes += "<td>"+rowObj.leadRole+"</td>";
+					subRes += "<td>"+rowObj.attach+"</td>";
+					subRes += "</tr>";
+					return subRes;
+				}
+
+				//dd rows to the xml throughout the tree
+				const addChildRow = function (someObj, rowsLine){
+					//add the row we're on to the rows string
+					rowsLine.push(makeRow(someObj));
+					//if there's children
+					if(someObj.children){
+						//recurse, for each child
+						someObj.children.forEach(function(child){
+							addChildRow(child,rowsLine);
+						});
+					}				
+					return rowsLine;
+				}
+				
+				rowsArr = [];
+
+				rowsArr=addChildRow(data, headers);
+				rowsArr.forEach(function(row){
+					res+=row;
+				});
+				return res;
+			}
+
+			//given an object with an id, find the data with the same id and copy the values over to the object.
+			let match = function(heir, data){
+				//look until we find a match
+				data.some(function(dataRow){
+					//we found one
+					if(dataRow.id==heir.id){
+						heir.predecessor = dataRow.predecessor; heir.n = dataRow.n; heir.status = dataRow.status; heir.leader = dataRow.leader;
+						heir.leadRole = dataRow.leadRole; heir.planStart = dataRow.planStart; heir.planFinish = dataRow.planFinish;
+						heir.duration = dataRow.duration; heir.hours = dataRow.hours; heir.attach = dataRow.attach;
+						//increment the level, since we're deeper in the tree
+						heir.level+=1;
+						return heir;
+					}
+				});
+				//if no match was found, return the original, unmodified.
+				return heir;
+			}
+
+			//match all the sources of this object and all its descendants
+			let matchSources = function(piece, data){
+				//if we have children
+				if(piece.children){
+					//recurse for each child, matching data as we go
+					piece.children.forEach(function(child){
+						matchSources(child, data);
+						child = match(child,data);
+					});
+				//otherwise just match this pice
+				}else{
+					piece = match(piece, data);
+				}
+				piece = match(piece,data);
+
+				return piece;
+			}
+
+			//Export To Excel main sequence
+			const grid = treeGrid._grid;
+			//get the headers
+			let headArr = [];
+			headArr = getProjGridHead(grid);
+			//we are adding level, a column heading that represents what level of heirarchy something was at
+			headArr.unshift("level");
+			//get the start of structure from the grid object (we'll have an array of child IDs, which we later turn into an array of child objects)
+			let topObj = {label:"top", level:0, children:[]};
+			grid.roots.forEach(function(root){
+				topObj = getProjGridRowTree(topObj,grid);
+			});
+
+			//turn our child IDs into child objects
+			//Make a newObj. do a pass over the oldObj, looking for one with children. 
+			let newObj = {};
+			topObj.children.some(function(child, index, array){
+				//Found one? 
+				if (child.children != false ){
+					//copy it to newObj
+					newObj = child;
+					//remove it from topObj
+					array=array.splice(index,1);
+					//pop back up
+					return true;
+				}
+			});
+
+			newObj.children.forEach(descend);
+			//Apogee for everything in oldObj.
+			topObj.children.forEach(apogee);
+
+			//Get the values from the DOM
+			let dataObj = [];
+			dataObj = getProjGridRowData(dataObj);
+
+			//now to combine newObj's structure with dataObj's values.
+			newObj = matchSources(newObj,dataObj);
+
+			//Now we have a nicely organized object. Lets put it in a table.
+			var res = tableizer(headArr, newObj);
+			aras.export2Office(res,"excel");
+			return res;
+
+			}
+			//STOP EXPORT TO EXCEL CHANGES
+
+		// === Custom Actions menu =====
+
+
+		function onToolbarDropDownItemClick(optionId) {
+			if (optionId) {
+				if (optionId.indexOf("views_menu") !== -1) {
+					var selectedView = optionId.replace("views_menu", ""),
+						viewConfiguration = projectViewConfigurations[selectedView];
+
+					if (projectView.activeViewId !== viewConfiguration.id) {
+						projectView.configureView(viewConfiguration, true);
+					}
+				}
+				else if (optionId.indexOf("view_panel") !== -1) {
+					var panelId = optionId.replace("view_panel", ""),
+						viewPanel = projectView.getPanelById(panelId);
+
+					if (viewPanel.visible) {
+						viewPanel.hide();
+					}
+					else {
+						viewPanel.show();
+					}
+				}
+				else {
+					var actionId = optionId.split("-")[0],
+						actionItem = aras.getItemById("Action", actionId, 0);
+
+					if (actionItem) {
+						var activityTypeNode = aras.getItemTypeDictionary("Activity2").node,
+							itemTypeNd, itemType,
+							selectedId = "";
+
+						if (aras.getItemProperty(actionItem, "type") === "item") {
+							selectedId = viewShare.properties.selectedItemIds[0];
+						}
+
+						itemType = (activityTypeNode.selectSingleNode("Relationships/Item[@type='Item Action']/related_id/Item[id='" + actionId + "']")) ? "Activity2" : "WBS Element";
+						itemTypeNd = aras.getItemTypeForClient(itemType, "name").node;
+
+						if (itemTypeNd) {
+							aras.invokeAction(actionItem, itemTypeNd.getAttribute("id"), selectedId);
+						}
+					}
+				}
+
+				treeGrid._grid.render();
+			}
+		}
+
+		function getItemTypeDescriptor(itemTypeName) {
+			if (itemTypeName) {
+				if (!itemTypeDescriptors[itemTypeName]) {
+					var typeDescriptor = {},
+						propertyNodes, propertyNode, propertyName, i;
+
+					typeDescriptor.type = aras.getItemTypeDictionary(itemTypeName).node;
+
+					typeDescriptor.properties = {};
+					propertyNodes = typeDescriptor.type.selectNodes('Relationships/Item[@type="Property" and name!="" and (not(@action) or (@action!="delete" and @action!="purge"))]');
+
+					for (i = 0; i < propertyNodes.length; i++) {
+						propertyName = aras.getItemProperty(propertyNodes[i], "name");
+						typeDescriptor.properties[propertyName] = propertyNodes[i];
+					}
+
+					itemTypeDescriptors[itemTypeName] = typeDescriptor;
+				}
+
+				return itemTypeDescriptors[itemTypeName];
+			}
+		}
+
+		//=== end of Custom Actions menu ======
+	</script>
+	<script type="text/javascript" src="../../javascript/ProjectPlan.js"></script>
+	<script type="text/javascript" src="../../javascript/treePanel.js"></script>
+
+</head>
+<body class="claro">
+	<div id="toolbarContainer">
+	</div>
+	<div id="viewContainer" class="aras-flex">
+		<div id="gridContainer" class="aras-flex-grow"></div>
+	</div>
+</body>
+</html>
