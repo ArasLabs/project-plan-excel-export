@@ -43,6 +43,10 @@ Project | Aras
 5. Left click the Export to Excel button ![Export to Excel](./Screenshots/excel.jpg) in the tree grid toolbar
 6. A download will begin in your browser with the excel file. 
 
+When done, your file will look something like this:
+![Results](./Screenshots/result.jpg)
+
+Note: At present, custom grid layouts are not supported by this project.
 
 ## Contributing
 
